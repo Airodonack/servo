@@ -110,6 +110,10 @@ pub trait Player: Send + MediaInstance {
     fn volume(&self) -> f64;
     fn set_input_size(&self, size: u64) -> Result<(), PlayerError>;
     fn set_seekable(&self, seekable: bool) -> Result<(), PlayerError>;
+    /// Tell the player the URL the data given to `push_data` was fetched from.
+    /// A backend that fetches parts of a resource for itself (an HLS demuxer
+    /// resolving relative playlist and segment URLs) needs it; others may ignore it.
+    fn set_resource_url(&self, url: &str) -> Result<(), PlayerError>;
     fn set_download_buffering_enabled(&self, enabled: bool) -> Result<(), PlayerError>;
     fn set_playback_rate(&self, playback_rate: f64) -> Result<(), PlayerError>;
     fn playback_rate(&self) -> f64;

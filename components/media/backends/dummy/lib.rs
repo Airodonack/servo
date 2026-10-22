@@ -197,6 +197,10 @@ impl Player for DummyPlayer {
         Ok(())
     }
 
+    fn set_resource_url(&self, _: &str) -> Result<(), PlayerError> {
+        Ok(())
+    }
+
     fn set_download_buffering_enabled(&self, _: bool) -> Result<(), PlayerError> {
         Ok(())
     }

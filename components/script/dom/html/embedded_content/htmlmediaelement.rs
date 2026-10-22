@@ -4390,6 +4390,19 @@ impl FetchResponseListener for HTMLMediaElementFetchListener {
             warn!("Could not set player seekable {:?}", e);
         }
 
+        if let Some(metadata) = metadata.as_ref() &&
+            let Err(e) = element
+                .player
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .set_resource_url(metadata.final_url.as_str())
+        {
+            warn!("Could not set player resource URL {:?}", e);
+        }
+
         if let Some(expected_content_length) = self.expected_content_length &&
             let Err(e) = element
                 .player
