@@ -536,6 +536,7 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
 
     /// <https://w3c.github.io/media-source/#dom-mediasource-duration>
     fn SetDuration(&self, value: f64) -> ErrorResult {
+        debug!("MediaSource: duration = {value}");
         // Step 1. If the value being set is negative or NaN then throw a TypeError.
         if value.is_nan() || value < 0.0 {
             return Err(Error::Type(c"Duration is negative or NaN".to_owned()));
@@ -613,8 +614,10 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         if !is_valid_media_source_type(&type_.str()) ||
             !ServoMedia::get().is_media_source_type_supported(&type_.str())
         {
+            debug!("MediaSource: addSourceBuffer({type_}) refused: unsupported type");
             return Err(Error::NotSupported(None));
         }
+        debug!("MediaSource: addSourceBuffer({type_})");
         // Step 3. If the readyState attribute is not in the "open" state then
         // throw an InvalidStateError exception.
         if self.ready_state.get() != ReadyState::Open {
@@ -661,6 +664,7 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
 
     /// <https://w3c.github.io/media-source/#dom-mediasource-endofstream>
     fn EndOfStream(&self, _cx: &mut JSContext, error: Option<EndOfStreamError>) -> ErrorResult {
+        debug!("MediaSource: endOfStream({error:?})");
         // Step 1. If the readyState attribute is not in the "open" state then
         // throw an InvalidStateError exception.
         if self.ready_state.get() != ReadyState::Open {
@@ -744,7 +748,9 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         }
         // Steps 2-6. The type must be a registered byte stream format with
         // codecs the format allows, and the media backend must decode them.
-        is_valid_media_source_type(&type_.str()) &&
-            ServoMedia::get().is_media_source_type_supported(&type_.str())
+        let valid = is_valid_media_source_type(&type_.str());
+        let supported = valid && ServoMedia::get().is_media_source_type_supported(&type_.str());
+        debug!("MediaSource: isTypeSupported({type_}) = {supported} (valid syntax: {valid})");
+        supported
     }
 }

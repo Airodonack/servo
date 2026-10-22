@@ -118,6 +118,15 @@ impl SourceBuffer {
         self.updating.get()
     }
 
+    /// The content type the backend holds for this buffer, for logging.
+    fn content_type(&self) -> String {
+        self.handle
+            .borrow()
+            .as_ref()
+            .map(|handle| handle.content_type())
+            .unwrap_or_default()
+    }
+
     pub(crate) fn handle(&self) -> std::cell::Ref<'_, Option<Box<dyn SourceBufferHandle>>> {
         self.handle.borrow()
     }
@@ -218,6 +227,11 @@ impl SourceBuffer {
     }
 
     fn handle_backend_event(&self, _cx: &mut JSContext, event: SourceBufferEvent) {
+        debug!(
+            "SourceBuffer({}): backend {event:?}, buffered {:?}",
+            self.content_type(),
+            self.buffered_ranges()
+        );
         // Outcomes of an operation the DOM already finished (an abort from
         // script, an error already reported) are not reported twice.
         if self.removed.get() || !self.updating.get() {
@@ -303,6 +317,7 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
 
     /// <https://w3c.github.io/media-source/#dom-sourcebuffer-mode>
     fn SetMode(&self, _cx: &mut JSContext, value: AppendMode) -> ErrorResult {
+        debug!("SourceBuffer({}): mode = {value:?}", self.content_type());
         // Steps 1-2. If this object has been removed from the sourceBuffers
         // attribute of the parent media source, or the updating attribute
         // equals true, then throw an InvalidStateError exception.
@@ -352,6 +367,7 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
 
     /// <https://w3c.github.io/media-source/#dom-sourcebuffer-timestampoffset>
     fn SetTimestampOffset(&self, value: Finite<f64>) -> ErrorResult {
+        debug!("SourceBuffer({}): timestampOffset = {}", self.content_type(), *value);
         // Steps 2-3, 5. Removed or updating: InvalidStateError; ended: reopen.
         self.check_state(true)?;
         // Steps 6-7. In sequence mode the group start timestamp follows.
@@ -443,14 +459,26 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
         // Steps 2-4. Add data to the end of the input buffer, set the updating
         // attribute to true, queue updatestart, and run the buffer append
         // algorithm asynchronously: the backend reports its progress.
+        debug!(
+            "SourceBuffer({}): appendBuffer({} bytes), timestampOffset {}, window {}..{}",
+            self.content_type(),
+            bytes.len(),
+            *self.TimestampOffset(),
+            self.append_window_start.get(),
+            self.append_window_end.get()
+        );
         self.with_handle(|handle| handle.append(bytes))?
-            .map_err(media_source_error)?;
+            .map_err(|error| {
+                debug!("SourceBuffer: append refused: {error:?}");
+                media_source_error(error)
+            })?;
         self.start_update(false);
         Ok(())
     }
 
     /// <https://w3c.github.io/media-source/#dom-sourcebuffer-abort>
     fn Abort(&self, _cx: &mut JSContext) -> ErrorResult {
+        debug!("SourceBuffer({}): abort()", self.content_type());
         // Step 1. If this object has been removed from the sourceBuffers
         // attribute of the parent media source then throw an InvalidStateError
         // exception.
@@ -482,6 +510,7 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
 
     /// <https://w3c.github.io/media-source/#dom-sourcebuffer-changetype>
     fn ChangeType(&self, type_: DOMString) -> ErrorResult {
+        debug!("SourceBuffer({}): changeType({type_})", self.content_type());
         // Step 1. If type is an empty string then throw a TypeError exception.
         if type_.is_empty() {
             return Err(Error::Type(c"The content type is empty".to_owned()));
@@ -500,6 +529,7 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
 
     /// <https://w3c.github.io/media-source/#dom-sourcebuffer-remove>
     fn Remove(&self, _cx: &mut JSContext, start: Finite<f64>, end: f64) -> ErrorResult {
+        debug!("SourceBuffer({}): remove({}, {end})", self.content_type(), *start);
         // Steps 1-2. Removed or updating: InvalidStateError.
         self.check_state(false)?;
         // Step 3. If duration equals NaN, then throw a TypeError exception.
