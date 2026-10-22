@@ -836,6 +836,22 @@ impl HTMLMediaElement {
         )
     }
 
+    /// <https://html.spec.whatwg.org/multipage/#time-marches-on> (step 6)
+    fn queue_timeupdate_for_normal_playback(&self, playback_was_moved_monotonic_increase: bool) {
+        // Step 6. If the time was reached through the usual monotonic increase of the current
+        // playback position during normal playback, and if the user agent has not fired a
+        // timeupdate event at the element in the past 15 to 250ms and is not still running event
+        // handlers for such an event, then the user agent must queue a media element task given the
+        // media element to fire an event named timeupdate at the element.
+        if playback_was_moved_monotonic_increase &&
+            Instant::now() > self.next_timeupdate_event.get()
+        {
+            self.queue_media_element_task_to_fire_event(atom!("timeupdate"));
+            self.next_timeupdate_event
+                .set(Instant::now() + Duration::from_millis(250));
+        }
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#time-marches-on>
     fn time_marches_on(&self, cx: &mut JSContext, playback_was_moved: PlaybackPositionWasMoved) {
         let playback_was_moved_monotonic_increase =
@@ -849,6 +865,11 @@ impl HTMLMediaElement {
         // all the cues of hidden and showing text tracks of the media element
         // that are not present in current cues.
         let Some(text_tracks_list) = self.text_tracks_list.get() else {
+            // No text tracks, so no cues to update, but the timeupdate of step 6
+            // still applies.
+            self.position_when_time_marches_on_ran
+                .set(Some(self.current_playback_position.get()));
+            self.queue_timeupdate_for_normal_playback(playback_was_moved_monotonic_increase);
             return;
         };
         let Some((current_cues, other_cues)) =
@@ -899,18 +920,8 @@ impl HTMLMediaElement {
                 vec![]
             };
 
-        // Step 6. If the time was reached through the usual monotonic increase of the current
-        // playback position during normal playback, and if the user agent has not fired a
-        // timeupdate event at the element in the past 15 to 250ms and is not still running event
-        // handlers for such an event, then the user agent must queue a media element task given the
-        // media element to fire an event named timeupdate at the element.
-        if playback_was_moved_monotonic_increase &&
-            Instant::now() > self.next_timeupdate_event.get()
-        {
-            self.queue_media_element_task_to_fire_event(atom!("timeupdate"));
-            self.next_timeupdate_event
-                .set(Instant::now() + Duration::from_millis(250));
-        }
+        // Step 6.
+        self.queue_timeupdate_for_normal_playback(playback_was_moved_monotonic_increase);
 
         // Step 7. If all of the cues in current cues have their text track cue active flag set,
         // none of the cues in other cues have their text track cue active flag set,
