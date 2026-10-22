@@ -1027,10 +1027,26 @@ impl Player for GStreamerPlayer {
 
     fn attach_media_source(
         &self,
-        _callback: GenericCallback<MediaSourceEvent>,
+        callback: GenericCallback<MediaSourceEvent>,
     ) -> Result<Box<dyn MediaSourceHandle>, PlayerError> {
-        // Filled in by the mselib-backed implementation.
-        Err(PlayerError::MediaSourceNotSupported)
+        #[cfg(feature = "mse")]
+        {
+            // `setup` returns once `source-setup` has run, so the msesrc exists.
+            self.setup()?;
+            let inner = self.inner.borrow();
+            let inner = inner.as_ref().unwrap().lock().unwrap();
+            let Some(PlayerSource::MediaSource(ref element)) = inner.source else {
+                return Err(PlayerError::MediaSourceNotSupported);
+            };
+            let source = crate::media_source::GStreamerMediaSource::attach(element, callback)
+                .map_err(|error| PlayerError::Backend(format!("{error:?}")))?;
+            Ok(Box::new(source))
+        }
+        #[cfg(not(feature = "mse"))]
+        {
+            let _ = callback;
+            Err(PlayerError::MediaSourceNotSupported)
+        }
     }
     inner_player_proxy!(set_mute, muted, bool);
     inner_player_proxy_getter!(muted, bool, DEFAULT_MUTED);

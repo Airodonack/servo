@@ -14,9 +14,12 @@ name = "servo_media_gstreamer"
 path = "lib.rs"
 
 [features]
+default = ["mse"]
 glx = ["servo-media-gstreamer-render-unix/gl-x11"]
 wayland = ["servo-media-gstreamer-render-unix/gl-wayland"]
 v1_28 = ["gstreamer/v1_28"]
+# Media Source Extensions through GStreamer's mselib (gst-plugins-bad >= 1.24).
+mse = ["dep:gstreamer-mse"]
 
 [dependencies]
 byte-slice-cast = { workspace = true }
@@ -27,6 +30,7 @@ gstreamer = { workspace = true }
 gstreamer-app = { workspace = true }
 gstreamer-audio = { workspace = true }
 gstreamer-base = { workspace = true }
+gstreamer-mse = { workspace = true, optional = true }
 gstreamer-play = { workspace = true }
 gstreamer-sdp = { workspace = true }
 gstreamer-sys = { workspace = true }

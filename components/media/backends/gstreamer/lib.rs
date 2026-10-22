@@ -8,6 +8,8 @@ pub mod audio_stream_reader;
 mod datachannel;
 mod device_monitor;
 pub mod media_capture;
+#[cfg(feature = "mse")]
+mod media_source;
 pub mod media_stream;
 mod media_stream_source;
 pub mod player;
@@ -281,6 +283,11 @@ impl Backend for GStreamerBackend {
             return Some(self.create_videostream());
         }
         media_capture::create_videoinput_stream(set)
+    }
+
+    #[cfg(feature = "mse")]
+    fn is_media_source_type_supported(&self, media_type: &str) -> bool {
+        gstreamer_mse::MediaSource::is_type_supported(media_type)
     }
 
     fn can_play_type(&self, media_type: &str) -> SupportsMediaType {
