@@ -146,6 +146,12 @@ pub trait SourceBufferHandle: Send {
     /// <https://w3c.github.io/media-source/#dom-sourcebuffer-updating>
     fn updating(&self) -> bool;
 
+    /// Whether the buffer has received an initialization segment and so
+    /// contributes tracks: the spec's membership of `activeSourceBuffers`.
+    ///
+    /// <https://w3c.github.io/media-source/#dom-mediasource-activesourcebuffers>
+    fn is_active(&self) -> bool;
+
     /// <https://w3c.github.io/media-source/#dom-sourcebuffer-buffered>
     fn buffered(&self) -> BufferedRanges;
 

@@ -119,6 +119,8 @@ pub struct Preferences {
     pub devtools_server_listen_address: String,
     // feature: WebGPU | #24706 | Web/API/WebGPU_API
     pub dom_webgpu_enabled: bool,
+    // feature: Media Source Extensions | | Web/API/Media_Source_Extensions_API
+    pub dom_media_source_enabled: bool,
     /// List of comma-separated backends to be used by wgpu.
     pub dom_webgpu_wgpu_backend: String,
     // feature: Adopted Stylesheet | #38132 | Web/API/Document/adoptedStyleSheets
@@ -484,6 +486,7 @@ impl Preferences {
             dom_web_animations_enabled: false,
             dom_webgl2_enabled: false,
             dom_webgpu_enabled: false,
+            dom_media_source_enabled: false,
             dom_webgpu_wgpu_backend: String::new(),
             dom_webrtc_enabled: false,
             dom_webrtc_transceiver_enabled: false,

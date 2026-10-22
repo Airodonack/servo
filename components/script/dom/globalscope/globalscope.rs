@@ -125,6 +125,7 @@ use crate::dom::globalscope::script_execution::{
     fill_compile_options, maybe_associate_with_script,
 };
 use crate::dom::idbfactory::IDBFactory;
+use crate::dom::mediasource::MediaSource;
 use crate::dom::messageport::MessagePort;
 use crate::dom::paintworkletglobalscope::PaintWorkletGlobalScope;
 use crate::dom::performance::performance::Performance;
@@ -202,6 +203,13 @@ pub(crate) struct GlobalScope {
 
     /// Timers (milliseconds) used by the Console API.
     console_timers: DomRefCell<HashMap<DOMString, Instant>>,
+
+    /// The MediaSource objects given a blob URL by `URL.createObjectURL`,
+    /// by that URL, until revoked. They resolve only for media elements in
+    /// this global.
+    ///
+    /// <https://w3c.github.io/media-source/#mediasource-object-url>
+    media_source_urls: DomRefCell<HashMapTracedValues<String, Dom<MediaSource>, FxBuildHasher>>,
 
     /// For providing instructions to an optional devtools server.
     #[no_trace]
@@ -408,6 +416,7 @@ impl GlobalScope {
             indexeddb: Default::default(),
             worker_map: DomRefCell::new(HashMapTracedValues::new_fx()),
             console_timers: DomRefCell::new(Default::default()),
+            media_source_urls: DomRefCell::new(Default::default()),
             devtools_chan,
             mem_profiler_chan,
             time_profiler_chan,
@@ -1664,6 +1673,28 @@ impl GlobalScope {
                 },
             },
         }
+    }
+
+    /// Registers a MediaSource under a blob URL created for it.
+    ///
+    /// <https://w3c.github.io/media-source/#dom-url-createobjecturl>
+    pub(crate) fn register_media_source_url(&self, url: String, media_source: &MediaSource) {
+        self.media_source_urls
+            .borrow_mut()
+            .insert(url, Dom::from_ref(media_source));
+    }
+
+    /// The MediaSource a blob URL was created for in this global, if any.
+    pub(crate) fn media_source_for_url(&self, url: &str) -> Option<DomRoot<MediaSource>> {
+        self.media_source_urls
+            .borrow()
+            .get(url)
+            .map(|media_source| DomRoot::from_ref(&**media_source))
+    }
+
+    /// <https://w3c.github.io/media-source/#dom-url-revokeobjecturl>
+    pub(crate) fn revoke_media_source_url(&self, url: &str) -> bool {
+        self.media_source_urls.borrow_mut().remove(url).is_some()
     }
 
     pub(crate) fn get_blob_url_id(&self, blob_id: &BlobId) -> Uuid {
