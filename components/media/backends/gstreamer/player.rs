@@ -274,7 +274,11 @@ impl PlayerInner {
         if self.stream_type == StreamType::Stream {
             return Err(PlayerError::NonSeekableStream);
         }
-        if let Some(ref metadata) = self.last_metadata &&
+        // With a MediaSource the duration is the MediaSource's, which the
+        // element has already clamped the time to; the pipeline's duration
+        // lags behind what has been appended.
+        if self.stream_type != StreamType::MediaSource &&
+            let Some(ref metadata) = self.last_metadata &&
             let Some(ref duration) = metadata.duration &&
             duration < &time::Duration::new(time as u64, 0)
         {
