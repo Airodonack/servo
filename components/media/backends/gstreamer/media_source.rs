@@ -101,9 +101,10 @@ impl MediaSourceHandle for GStreamerMediaSource {
     }
 
     fn set_duration(&self, duration: f64) -> Result<(), MediaSourceError> {
-        self.source
-            .set_duration(clock_time(duration))
-            .map_err(map_error)
+        // A live stream's duration is positive Infinity, which mselib holds as
+        // GST_CLOCK_TIME_NONE.
+        let duration = duration.is_finite().then(|| clock_time(duration));
+        self.source.set_duration(duration).map_err(map_error)
     }
 
     fn add_source_buffer(
