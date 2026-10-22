@@ -115,7 +115,11 @@ impl MediaSourceHandle for GStreamerMediaSource {
             .source
             .add_source_buffer(content_type)
             .map_err(map_error)?;
-        Ok(Box::new(GStreamerSourceBuffer::new(buffer, callback)))
+        Ok(Box::new(GStreamerSourceBuffer::new(
+            &self.source,
+            buffer,
+            callback,
+        )))
     }
 
     fn remove_source_buffer(
@@ -178,10 +182,16 @@ fn source_buffer_id(buffer: &gst_mse::SourceBuffer) -> Option<usize> {
 pub struct GStreamerSourceBuffer {
     id: usize,
     buffer: gst_mse::SourceBuffer,
+    /// The media source the buffer belongs to, for its active list.
+    source: gst_mse::MediaSource,
 }
 
 impl GStreamerSourceBuffer {
-    fn new(buffer: gst_mse::SourceBuffer, callback: GenericCallback<SourceBufferEvent>) -> Self {
+    fn new(
+        source: &gst_mse::MediaSource,
+        buffer: gst_mse::SourceBuffer,
+        callback: GenericCallback<SourceBufferEvent>,
+    ) -> Self {
         let id = NEXT_SOURCE_BUFFER_ID.fetch_add(1, Ordering::Relaxed);
         // SAFETY: the key is private to this module and the value is a `usize`.
         unsafe { buffer.set_data(SOURCE_BUFFER_ID_KEY, id) };
@@ -196,7 +206,11 @@ impl GStreamerSourceBuffer {
         buffer.connect_on_error(move |_| notify!(cb, SourceBufferEvent::Error));
         let cb = callback;
         buffer.connect_on_abort(move |_| notify!(cb, SourceBufferEvent::Abort));
-        Self { id, buffer }
+        Self {
+            id,
+            buffer,
+            source: source.clone(),
+        }
     }
 }
 
@@ -211,6 +225,13 @@ impl SourceBufferHandle for GStreamerSourceBuffer {
 
     fn updating(&self) -> bool {
         self.buffer.is_updating()
+    }
+
+    fn is_active(&self) -> bool {
+        let active = self.source.active_source_buffers();
+        (0..active.length())
+            .filter_map(|i| active.index(i))
+            .any(|candidate| candidate == self.buffer)
     }
 
     fn buffered(&self) -> BufferedRanges {
