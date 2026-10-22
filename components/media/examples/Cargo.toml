@@ -13,6 +13,7 @@ publish = false
 euclid = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
+servo-base = { workspace = true }
 freetype-sys = { workspace = true, features = ["bundled"] } # used only to force bundled to make it standalone for CI
 servo-media = { workspace = true }
 servo-media-auto = { workspace = true }
