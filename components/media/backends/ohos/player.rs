@@ -475,6 +475,18 @@ impl Player for OhosAvPlayer {
         Ok(())
     }
 
+    fn attach_media_source(
+        &self,
+        _: servo_base::generic_channel::GenericCallback<
+            servo_media::player::media_source::MediaSourceEvent,
+        >,
+    ) -> Result<
+        Box<dyn servo_media::player::media_source::MediaSourceHandle>,
+        servo_media::player::PlayerError,
+    > {
+        Err(servo_media::player::PlayerError::MediaSourceNotSupported)
+    }
+
     fn set_download_buffering_enabled(
         &self,
         enabled: bool,

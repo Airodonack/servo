@@ -20,6 +20,7 @@ use servo_base::generic_channel::{self, GenericCallback, GenericReceiver};
 use servo_media::MediaInstanceError;
 use servo_media_player::audio::AudioRenderer;
 use servo_media_player::context::PlayerGLContext;
+use servo_media_player::media_source::{MediaSourceEvent, MediaSourceHandle};
 use servo_media_player::metadata::Metadata;
 use servo_media_player::video::VideoFrameRenderer;
 use servo_media_player::{
@@ -120,6 +121,8 @@ impl AsRef<[f32]> for GStreamerAudioChunk {
 enum PlayerSource {
     Seekable(ServoSrc),
     Stream(ServoMediaStreamSrc),
+    /// The `mse` plugin's source element, attached to from `attach_media_source`.
+    MediaSource(gstreamer::Element),
 }
 
 struct PlayerInner {
@@ -188,7 +191,7 @@ impl PlayerInner {
     }
 
     pub fn set_playback_rate(&mut self, playback_rate: f64) -> Result<(), PlayerError> {
-        if self.stream_type != StreamType::Seekable {
+        if self.stream_type == StreamType::Stream {
             return Err(PlayerError::NonSeekableStream);
         }
 
@@ -268,7 +271,7 @@ impl PlayerInner {
     }
 
     pub fn seek(&mut self, time: f64) -> Result<(), PlayerError> {
-        if self.stream_type != StreamType::Seekable {
+        if self.stream_type == StreamType::Stream {
             return Err(PlayerError::NonSeekableStream);
         }
         if let Some(ref metadata) = self.last_metadata &&
@@ -642,6 +645,9 @@ impl GStreamerPlayer {
                 })?;
                 "servosrc://".to_value()
             },
+            // The `mse` plugin's source element: a media source is attached to
+            // it in the `source-setup` handler.
+            StreamType::MediaSource => "mse://".to_value(),
         };
         player.set_property("uri", &uri);
 
@@ -931,6 +937,13 @@ impl GStreamerPlayer {
                         });
                         PlayerSource::Stream(media_stream_src)
                     },
+                    StreamType::MediaSource => {
+                        let sender_clone = sender.clone();
+                        is_ready_clone.call_once(|| {
+                            let _ = notify!(sender_clone, Ok(()));
+                        });
+                        PlayerSource::MediaSource(source)
+                    },
                 };
 
                 inner.set_src(source);
@@ -1011,6 +1024,14 @@ impl Player for GStreamerPlayer {
     inner_player_proxy!(set_input_size, size, u64);
     inner_player_proxy!(set_seekable, seekable, bool);
     inner_player_proxy!(set_resource_url, url, &str);
+
+    fn attach_media_source(
+        &self,
+        _callback: GenericCallback<MediaSourceEvent>,
+    ) -> Result<Box<dyn MediaSourceHandle>, PlayerError> {
+        // Filled in by the mselib-backed implementation.
+        Err(PlayerError::MediaSourceNotSupported)
+    }
     inner_player_proxy!(set_mute, muted, bool);
     inner_player_proxy_getter!(muted, bool, DEFAULT_MUTED);
     inner_player_proxy!(set_playback_rate, playback_rate, f64);
