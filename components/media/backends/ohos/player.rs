@@ -471,6 +471,10 @@ impl Player for OhosAvPlayer {
         Ok(())
     }
 
+    fn set_resource_url(&self, _: &str) -> Result<(), servo_media::player::PlayerError> {
+        Ok(())
+    }
+
     fn set_download_buffering_enabled(
         &self,
         enabled: bool,

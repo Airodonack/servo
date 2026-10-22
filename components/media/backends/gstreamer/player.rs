@@ -129,6 +129,7 @@ struct PlayerInner {
     video_sink: gstreamer_app::AppSink,
     input_size: u64,
     seekable: bool,
+    resource_url: Option<String>,
     play_state: gstreamer_play::PlayState,
     paused: Cell<bool>,
     can_resume: Cell<bool>,
@@ -160,6 +161,14 @@ impl PlayerInner {
         self.seekable = seekable;
         if let Some(PlayerSource::Seekable(ref mut source)) = self.source {
             source.set_seekable(seekable);
+        }
+        Ok(())
+    }
+
+    pub fn set_resource_url(&mut self, url: &str) -> Result<(), PlayerError> {
+        self.resource_url = Some(url.to_owned());
+        if let Some(PlayerSource::Seekable(ref mut source)) = self.source {
+            source.set_resource_uri(url);
         }
         Ok(())
     }
@@ -648,6 +657,7 @@ impl GStreamerPlayer {
             video_sink,
             input_size: 0,
             seekable: true,
+            resource_url: None,
             play_state: gstreamer_play::PlayState::Stopped,
             paused: Cell::new(DEFAULT_PAUSED),
             can_resume: Cell::new(DEFAULT_CAN_RESUME),
@@ -852,6 +862,9 @@ impl GStreamerPlayer {
                             servosrc.set_size(inner.input_size as i64);
                         }
                         servosrc.set_seekable(inner.seekable);
+                        if let Some(ref url) = inner.resource_url {
+                            servosrc.set_resource_uri(url);
+                        }
 
                         let sender_clone = sender.clone();
                         let is_ready = is_ready_clone.clone();
@@ -997,6 +1010,7 @@ impl Player for GStreamerPlayer {
     inner_player_proxy!(end_of_stream, ());
     inner_player_proxy!(set_input_size, size, u64);
     inner_player_proxy!(set_seekable, seekable, bool);
+    inner_player_proxy!(set_resource_url, url, &str);
     inner_player_proxy!(set_mute, muted, bool);
     inner_player_proxy_getter!(muted, bool, DEFAULT_MUTED);
     inner_player_proxy!(set_playback_rate, playback_rate, f64);

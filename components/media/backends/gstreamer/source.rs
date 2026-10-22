@@ -49,6 +49,10 @@ mod imp {
         seeking: AtomicBool,
         seekable: AtomicBool,
         size: Mutex<Option<i64>>,
+        /// The URL the pushed data was fetched from, answered to `GST_QUERY_URI` so
+        /// that downstream elements that fetch for themselves (an adaptive demuxer
+        /// resolving relative playlist and segment URLs) know where the data lives.
+        resource_uri: Mutex<Option<String>>,
     }
 
     impl ServoSrc {
@@ -68,6 +72,10 @@ mod imp {
 
         pub fn set_seekable(&self, seekable: bool) {
             self.seekable.store(seekable, Ordering::Relaxed);
+        }
+
+        pub fn set_resource_uri(&self, uri: &str) {
+            *self.resource_uri.lock().unwrap() = Some(uri.to_owned());
         }
 
         pub fn set_seek_offset<O: IsA<gstreamer::Object>>(&self, parent: &O, offset: u64) -> bool {
@@ -231,6 +239,15 @@ mod imp {
                     q.add_scheduling_modes([gstreamer::PadMode::Push]);
                     true
                 },
+                gstreamer::QueryViewMut::Uri(ref mut q) => {
+                    match *self.resource_uri.lock().unwrap() {
+                        Some(ref uri) => {
+                            q.set_uri(Some(uri.as_str()));
+                            true
+                        },
+                        None => false,
+                    }
+                },
                 _ => gstreamer::Pad::query_default(pad, Some(&*self.obj()), query),
             };
 
@@ -282,6 +299,7 @@ mod imp {
                 seeking: AtomicBool::new(false),
                 seekable: AtomicBool::new(true),
                 size: Mutex::new(None),
+                resource_uri: Mutex::new(None),
             }
         }
     }
@@ -402,6 +420,10 @@ impl ServoSrc {
 
     pub fn set_seekable(&self, seekable: bool) {
         self.imp().set_seekable(seekable);
+    }
+
+    pub fn set_resource_uri(&self, uri: &str) {
+        self.imp().set_resource_uri(uri);
     }
 
     pub fn set_seek_offset(&self, offset: u64) -> bool {
