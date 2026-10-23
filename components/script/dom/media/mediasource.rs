@@ -38,6 +38,12 @@ use crate::dom::sourcebufferlist::SourceBufferList;
 use crate::dom::window::Window;
 use crate::tasks::task_source::SendableTaskSource;
 
+/// The longest a coded frame is taken to last, in seconds, where the duration
+/// change algorithm needs the presentation timestamp of the last buffered frame
+/// and only the end of the buffered ranges is known. web-platform-tests' media
+/// source tests assume the same bound for their media.
+const LONGEST_FRAME: f64 = 0.1;
+
 /// Maps a backend refusal to the exception the Media Source spec names.
 pub(crate) fn media_source_error(error: MediaSourceError) -> Error {
     match error {
@@ -326,6 +332,48 @@ impl MediaSource {
         self.queue_event("sourceopen");
     }
 
+    /// <https://w3c.github.io/media-source/#duration-change-algorithm>
+    fn change_duration(&self, new_duration: f64) -> ErrorResult {
+        // Step 1. If the current value of duration is equal to new duration,
+        // then return.
+        if self.duration.get() == new_duration {
+            return Ok(());
+        }
+        // Step 2. If new duration is less than the highest presentation
+        // timestamp of any buffered coded frames for all SourceBuffer objects
+        // in sourceBuffers, then throw an InvalidStateError exception.
+        // Steps 3-4. Let highest end time be the largest track buffer ranges
+        // end time across all SourceBuffer objects; if new duration is less,
+        // update it to highest end time.
+        // The backend reports buffered ranges, not the timestamps of the frames
+        // in them. Between the highest presentation timestamp and the highest
+        // end time there is at most the last frame, so a new duration within
+        // LONGEST_FRAME of the highest end time is taken to be in it and
+        // raised; one further below is refused. Buffered media is never
+        // truncated.
+        let highest_end_time = self
+            .source_buffers
+            .buffers()
+            .iter()
+            .flat_map(|buffer| buffer.buffered_ranges())
+            .map(|(_, end)| end)
+            .fold(f64::NEG_INFINITY, f64::max);
+        if new_duration < highest_end_time - LONGEST_FRAME {
+            return Err(Error::InvalidState(Some(
+                "The duration is below the buffered media".into(),
+            )));
+        }
+        let new_duration = new_duration.max(highest_end_time);
+        // Step 5. Update duration to new duration.
+        if let Some(handle) = self.handle.borrow().as_ref() {
+            handle.set_duration(new_duration).map_err(media_source_error)?;
+        }
+        // Step 6. Update the media element's duration and run its duration
+        // change algorithm.
+        self.set_duration_internal(new_duration);
+        Ok(())
+    }
+
     /// Duration change algorithm, steps 4-5: the new duration, and the media
     /// element's duration with it.
     ///
@@ -585,34 +633,7 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         }
         // Step 4. Run the duration change algorithm with new duration set to
         // the value being assigned to this attribute.
-        // Duration change algorithm, step 3: if the new duration is less than
-        // the highest starting presentation timestamp of any buffered coded
-        // frames, throw an InvalidStateError.
-        let highest_start = self
-            .source_buffers
-            .buffers()
-            .iter()
-            .flat_map(|buffer| buffer.buffered_ranges())
-            .map(|(start, _)| start)
-            .fold(f64::NEG_INFINITY, f64::max);
-        if value < highest_start {
-            return Err(Error::InvalidState(Some(
-                "The duration is below the buffered data".into(),
-            )));
-        }
-        if let Some(handle) = self.handle.borrow().as_ref() {
-            handle.set_duration(value).map_err(media_source_error)?;
-        }
-        // Duration change algorithm, step 4: if the new duration is less than
-        // the old one, remove the data past it from every source buffer.
-        let old_duration = self.duration.get();
-        if value < old_duration {
-            for buffer in self.source_buffers.buffers() {
-                buffer.truncate(value, old_duration);
-            }
-        }
-        self.set_duration_internal(value);
-        Ok(())
+        self.change_duration(value)
     }
 
     // https://w3c.github.io/media-source/#dom-mediasource-onsourceopen
