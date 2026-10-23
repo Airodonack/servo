@@ -91,6 +91,21 @@ pub enum SourceBufferEvent {
     Abort,
 }
 
+/// Identifies one append or remove on a source buffer, as returned when it is
+/// accepted. Numbers are not reused within a source buffer.
+pub type OperationId = u64;
+
+/// A `SourceBufferEvent` and the operation it belongs to. A backend may report
+/// an operation's outcome after the DOM has finished it (an abort) or started
+/// the next one, and report events of operations the DOM did not start as
+/// updates (removals for a duration change); the DOM acts only on events of
+/// the operation in progress.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SourceBufferReport {
+    pub operation: OperationId,
+    pub event: SourceBufferEvent,
+}
+
 /// Buffered time ranges, in seconds.
 pub type BufferedRanges = Vec<Range<f64>>;
 
@@ -132,7 +147,7 @@ pub trait MediaSourceHandle: Send {
     fn add_source_buffer(
         &self,
         content_type: &str,
-        callback: GenericCallback<SourceBufferEvent>,
+        callback: GenericCallback<SourceBufferReport>,
     ) -> Result<Box<dyn SourceBufferHandle>, MediaSourceError>;
 
     /// <https://w3c.github.io/media-source/#dom-mediasource-removesourcebuffer>
@@ -208,15 +223,16 @@ pub trait SourceBufferHandle: Send {
 
     /// <https://w3c.github.io/media-source/#dom-sourcebuffer-appendbuffer>
     /// Returns once the append has been accepted; its outcome arrives as
-    /// `SourceBufferEvent`s.
-    fn append(&self, data: Vec<u8>) -> Result<(), MediaSourceError>;
+    /// `SourceBufferReport`s carrying the returned operation.
+    fn append(&self, data: Vec<u8>) -> Result<OperationId, MediaSourceError>;
 
     /// <https://w3c.github.io/media-source/#dom-sourcebuffer-abort>
     fn abort(&self) -> Result<(), MediaSourceError>;
 
     /// <https://w3c.github.io/media-source/#dom-sourcebuffer-remove>
-    /// `end` of `None` is the spec's positive infinity.
-    fn remove(&self, start: f64, end: Option<f64>) -> Result<(), MediaSourceError>;
+    /// `end` of `None` is the spec's positive infinity. Its outcome arrives as
+    /// `SourceBufferReport`s carrying the returned operation.
+    fn remove(&self, start: f64, end: Option<f64>) -> Result<OperationId, MediaSourceError>;
 
     /// <https://w3c.github.io/media-source/#dom-sourcebuffer-changetype>
     fn change_type(&self, content_type: &str) -> Result<(), MediaSourceError>;

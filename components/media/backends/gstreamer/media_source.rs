@@ -9,6 +9,7 @@
 //! buffered ranges, the `updating` flag and the ready state; these handles
 //! only forward calls and relay signals as events.
 
+use std::collections::VecDeque;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -20,7 +21,7 @@ use servo_base::generic_channel::GenericCallback;
 use servo_media_player::media_source::{
     AppendMode, BufferedRanges, EndOfStreamError, MediaSourceError, MediaSourceEvent,
     MediaSourceHandle, MediaSourceReadyState, MediaSourceTrack, MediaSourceTrackKind,
-    SourceBufferEvent, SourceBufferHandle,
+    OperationId, SourceBufferEvent, SourceBufferHandle, SourceBufferReport,
 };
 
 use crate::player::clock_time;
@@ -113,7 +114,7 @@ impl MediaSourceHandle for GStreamerMediaSource {
     fn add_source_buffer(
         &self,
         content_type: &str,
-        callback: GenericCallback<SourceBufferEvent>,
+        callback: GenericCallback<SourceBufferReport>,
     ) -> Result<Box<dyn SourceBufferHandle>, MediaSourceError> {
         let buffer = self
             .source
@@ -212,33 +213,88 @@ pub struct GStreamerSourceBuffer {
     buffer: gst_mse::SourceBuffer,
     /// The media source the buffer belongs to, for its active list.
     source: gst_mse::MediaSource,
+    operations: Arc<Mutex<Operations>>,
+}
+
+/// Which operation mselib's signals belong to. mselib signals update-start once
+/// for every append and remove it accepts, in order, and every later signal
+/// until the next update-start belongs to that operation. It also signals
+/// update and update-end with no operation behind them (1.28.6 and main: an
+/// idle buffer signals both every second), which this attributes to the
+/// operation that already ended.
+#[derive(Default)]
+struct Operations {
+    /// The last operation number handed out.
+    last: OperationId,
+    /// Accepted operations whose update-start has not been signalled yet.
+    pending: VecDeque<OperationId>,
+    /// The operation the signals belong to: the one whose update-start came last.
+    signalled: OperationId,
 }
 
 impl GStreamerSourceBuffer {
     fn new(
         source: &gst_mse::MediaSource,
         buffer: gst_mse::SourceBuffer,
-        callback: GenericCallback<SourceBufferEvent>,
+        callback: GenericCallback<SourceBufferReport>,
     ) -> Self {
         let id = NEXT_SOURCE_BUFFER_ID.fetch_add(1, Ordering::Relaxed);
         // SAFETY: the key is private to this module and the value is a `usize`.
         unsafe { buffer.set_data(SOURCE_BUFFER_ID_KEY, id) };
+        let operations = Arc::new(Mutex::new(Operations::default()));
         let callback = Arc::new(Mutex::new(callback));
-        let cb = callback.clone();
-        buffer.connect_on_update_start(move |_| notify!(cb, SourceBufferEvent::UpdateStart));
-        let cb = callback.clone();
-        buffer.connect_on_update(move |_| notify!(cb, SourceBufferEvent::Update));
-        let cb = callback.clone();
-        buffer.connect_on_update_end(move |_| notify!(cb, SourceBufferEvent::UpdateEnd));
-        let cb = callback.clone();
-        buffer.connect_on_error(move |_| notify!(cb, SourceBufferEvent::Error));
-        let cb = callback;
-        buffer.connect_on_abort(move |_| notify!(cb, SourceBufferEvent::Abort));
+        let signalled_operations = operations.clone();
+        let report = move |event: SourceBufferEvent| {
+            let callback = callback.clone();
+            let operations = signalled_operations.clone();
+            move |_: &gst_mse::SourceBuffer| {
+                let operation = {
+                    let mut operations = operations.lock().unwrap();
+                    if event == SourceBufferEvent::UpdateStart {
+                        operations.signalled = operations.pending.pop_front().unwrap_or_default();
+                    }
+                    operations.signalled
+                };
+                notify!(callback, SourceBufferReport { operation, event: event.clone() });
+            }
+        };
+        buffer.connect_on_update_start(report(SourceBufferEvent::UpdateStart));
+        buffer.connect_on_update(report(SourceBufferEvent::Update));
+        buffer.connect_on_update_end(report(SourceBufferEvent::UpdateEnd));
+        buffer.connect_on_error(report(SourceBufferEvent::Error));
+        buffer.connect_on_abort(report(SourceBufferEvent::Abort));
         Self {
             id,
             buffer,
             source: source.clone(),
+            operations,
         }
+    }
+
+    /// Runs `start`, an mselib call that signals update-start once if it
+    /// succeeds, as a numbered operation. The number is queued first: mselib
+    /// can signal update-start on its own thread before the call returns.
+    fn start_operation(
+        &self,
+        start: impl FnOnce() -> Result<(), glib::Error>,
+    ) -> Result<OperationId, MediaSourceError> {
+        let operation = {
+            let mut operations = self.operations.lock().unwrap();
+            operations.last += 1;
+            let operation = operations.last;
+            operations.pending.push_back(operation);
+            operation
+        };
+        start().map_err(|error| {
+            // Refused: no update-start will come for it.
+            self.operations
+                .lock()
+                .unwrap()
+                .pending
+                .retain(|pending| *pending != operation);
+            map_error(error)
+        })?;
+        Ok(operation)
     }
 }
 
@@ -347,26 +403,25 @@ impl SourceBufferHandle for GStreamerSourceBuffer {
             .map_err(map_error)
     }
 
-    fn append(&self, data: Vec<u8>) -> Result<(), MediaSourceError> {
-        self.buffer
-            .append_buffer(gstreamer::Buffer::from_mut_slice(data))
-            .map_err(map_error)
+    fn append(&self, data: Vec<u8>) -> Result<OperationId, MediaSourceError> {
+        self.start_operation(|| {
+            self.buffer
+                .append_buffer(gstreamer::Buffer::from_mut_slice(data))
+        })
     }
 
     fn abort(&self) -> Result<(), MediaSourceError> {
         self.buffer.abort().map_err(map_error)
     }
 
-    fn remove(&self, start: f64, end: Option<f64>) -> Result<(), MediaSourceError> {
+    fn remove(&self, start: f64, end: Option<f64>) -> Result<OperationId, MediaSourceError> {
         // `None` is positive infinity: mselib takes it as "to the end". So is an end beyond
         // what a GstClockTime holds, which would otherwise clamp to the same time as a start
         // that far out, and mselib refuses an empty range.
         let end = end
             .map(clock_time)
             .filter(|end| *end != gstreamer::ClockTime::MAX);
-        self.buffer
-            .remove(clock_time(start), end)
-            .map_err(map_error)
+        self.start_operation(|| self.buffer.remove(clock_time(start), end))
     }
 
     fn change_type(&self, content_type: &str) -> Result<(), MediaSourceError> {
