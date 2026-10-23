@@ -23,6 +23,7 @@ use servo_media_audio::render_thread::AudioRenderThreadMsg;
 use servo_media_audio::sink::{AudioSink, AudioSinkError};
 use servo_media_audio::{AudioBackend, AudioStreamReader};
 use servo_media_player::context::PlayerGLContext;
+use servo_media_player::media_source::{MediaSourceEvent, MediaSourceHandle};
 use servo_media_player::{Player, PlayerError, PlayerEvent, StreamType, audio, video};
 use servo_media_streams::capture::MediaTrackConstraintSet;
 use servo_media_streams::device_monitor::{MediaDeviceInfo, MediaDeviceMonitor};
@@ -195,6 +196,13 @@ impl Player for DummyPlayer {
 
     fn set_seekable(&self, _: bool) -> Result<(), PlayerError> {
         Ok(())
+    }
+
+    fn attach_media_source(
+        &self,
+        _: GenericCallback<MediaSourceEvent>,
+    ) -> Result<Box<dyn MediaSourceHandle>, PlayerError> {
+        Err(PlayerError::MediaSourceNotSupported)
     }
 
     fn set_download_buffering_enabled(&self, _: bool) -> Result<(), PlayerError> {

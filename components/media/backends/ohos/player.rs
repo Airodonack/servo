@@ -20,6 +20,7 @@ use ohos_media_sys::avplayer_base::{
 };
 use servo_base::generic_channel::{GenericCallback, GenericReceiver, channel};
 use servo_media::{BackendMsg, ClientContextId, MediaInstance, MediaInstanceError};
+use servo_media_player::media_source::{MediaSourceEvent, MediaSourceHandle};
 use servo_media_player::metadata::Metadata;
 use servo_media_player::video::{self, Buffer, VideoFrame, VideoFrameData};
 use servo_media_player::{PlaybackState, Player, PlayerEvent, SeekLock, SeekLockMsg};
@@ -469,6 +470,13 @@ impl Player for OhosAvPlayer {
         debug!("SetSeekable: {}", seekable);
 
         Ok(())
+    }
+
+    fn attach_media_source(
+        &self,
+        _: GenericCallback<MediaSourceEvent>,
+    ) -> Result<Box<dyn MediaSourceHandle>, servo_media::player::PlayerError> {
+        Err(servo_media::player::PlayerError::MediaSourceNotSupported)
     }
 
     fn set_download_buffering_enabled(
