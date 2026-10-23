@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, Weak};
 
@@ -211,6 +212,10 @@ pub(crate) struct MediaSource {
     #[ignore_malloc_size_of = "Arc"]
     #[no_trace]
     callback_target: RefCell<Option<Arc<Mutex<BackendCallbackTarget<MediaSource>>>>>,
+    /// The ids of every track announced to the media element, so that a track
+    /// of a removed SourceBuffer, which the backend still lists, is not
+    /// announced again for the next one.
+    announced_track_ids: DomRefCell<HashSet<String>>,
 }
 
 impl MediaSource {
@@ -227,6 +232,7 @@ impl MediaSource {
             media_element: Default::default(),
             handle: DomRefCell::new(None),
             callback_target: RefCell::new(None),
+            announced_track_ids: Default::default(),
         }
     }
 
@@ -332,6 +338,7 @@ impl MediaSource {
         // Dropping the handle detaches the backend side.
         *self.handle.borrow_mut() = None;
         *self.callback_target.borrow_mut() = None;
+        self.announced_track_ids.borrow_mut().clear();
         self.media_element.set(None);
         // Step 7. Queue a task to fire an event named sourceclose at the MediaSource.
         self.queue_event("sourceclose");
@@ -453,8 +460,20 @@ impl MediaSource {
             .as_ref()
             .map(|handle| handle.tracks())
             .unwrap_or_default();
+        let new_tracks: Vec<_> = {
+            let announced = self.announced_track_ids.borrow();
+            tracks
+                .iter()
+                .filter(|track| !announced.contains(&track.id))
+                .cloned()
+                .collect()
+        };
         if let Some(element) = element.as_ref() {
-            buffer.set_track_ids(element.add_media_source_tracks(cx, &tracks));
+            let added = element.add_media_source_tracks(cx, &new_tracks);
+            self.announced_track_ids
+                .borrow_mut()
+                .extend(added.iter().cloned());
+            buffer.set_track_ids(added);
         }
         // Step 5.4. If active track flag equals true, add this SourceBuffer
         // to activeSourceBuffers and queue addsourcebuffer at it.
