@@ -2959,7 +2959,14 @@ impl HTMLMediaElement {
         // Step 6. If enable is true, then enable this audio track, otherwise, do not enable
         // this audio track.
         if audio_track_list.enabled_index().is_none() {
-            audio_track_list.set_enabled(audio_track_list.len() - 1, true);
+            if addtrack == AddTrackEvent::Queue {
+                // MSE sets enabled on the new track before announcing it, so no change event,
+                // and the backend plays the initialization segment's tracks already.
+                // <https://w3c.github.io/media-source/#sourcebuffer-init-segment-received>
+                audio_track.set_enabled(true);
+            } else {
+                audio_track_list.set_enabled(audio_track_list.len() - 1, true);
+            }
         }
 
         // Step 7. Fire an event named addtrack at this AudioTrackList object, using TrackEvent,
@@ -3054,7 +3061,12 @@ impl HTMLMediaElement {
         // selected video tracks, otherwise, do not select this video track. If other tracks are
         // unselected, then a change event will be fired.
         if video_track_list.selected_index().is_none() {
-            video_track_list.set_selected(video_track_list.len() - 1, true);
+            if addtrack == AddTrackEvent::Queue {
+                // As for audio: selected is set before the track is announced.
+                video_track.set_selected(true);
+            } else {
+                video_track_list.set_selected(video_track_list.len() - 1, true);
+            }
         }
 
         // Step 7. Fire an event named addtrack at this VideoTrackList object, using TrackEvent,
