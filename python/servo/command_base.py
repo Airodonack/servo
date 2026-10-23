@@ -797,6 +797,11 @@ class CommandBase(object):
                         " you are doing, consider removing `--no-default-features` from your invocation."
                     )
 
+            if self.enable_media:
+                # Media Source Extensions need mselib, which GStreamer 1.24 added.
+                if platform.is_gstreamer_mse_installed(self.target):
+                    features.append("media-gstreamer-mse")
+
             if self.config["build"]["debug-mozjs"] or debug_mozjs:
                 features.append("debugmozjs")
 

@@ -8,6 +8,29 @@ pub mod audio_stream_reader;
 mod datachannel;
 mod device_monitor;
 pub mod media_capture;
+#[cfg(feature = "mse")]
+mod media_source;
+/// Without the `mse` feature (mselib needs GStreamer 1.24) the backend
+/// supports no Media Source content type and attaches no media source.
+#[cfg(not(feature = "mse"))]
+mod media_source {
+    use servo_base::generic_channel::GenericCallback;
+    use servo_media_player::PlayerError;
+    use servo_media_player::media_source::{MediaSourceEvent, MediaSourceHandle};
+
+    use crate::player::GStreamerPlayer;
+
+    pub fn is_type_supported(_media_type: &str) -> bool {
+        false
+    }
+
+    pub fn attach(
+        _player: &GStreamerPlayer,
+        _callback: GenericCallback<MediaSourceEvent>,
+    ) -> Result<Box<dyn MediaSourceHandle>, PlayerError> {
+        Err(PlayerError::MediaSourceNotSupported)
+    }
+}
 pub mod media_stream;
 mod media_stream_source;
 pub mod player;
@@ -281,6 +304,10 @@ impl Backend for GStreamerBackend {
             return Some(self.create_videostream());
         }
         media_capture::create_videoinput_stream(set)
+    }
+
+    fn is_media_source_type_supported(&self, media_type: &str) -> bool {
+        media_source::is_type_supported(media_type)
     }
 
     fn can_play_type(&self, media_type: &str) -> SupportsMediaType {
