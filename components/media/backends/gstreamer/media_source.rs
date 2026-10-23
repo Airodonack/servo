@@ -20,7 +20,8 @@ use servo_base::generic_channel::GenericCallback;
 use servo_media_player::PlayerError;
 use servo_media_player::media_source::{
     AppendMode, BufferedRanges, EndOfStreamError, MediaSourceError, MediaSourceEvent,
-    MediaSourceHandle, OperationId, SourceBufferEvent, SourceBufferHandle, SourceBufferReport,
+    MediaSourceHandle, MediaSourceTrack, MediaSourceTrackKind, OperationId, SourceBufferEvent,
+    SourceBufferHandle, SourceBufferReport,
 };
 
 use crate::player::{GStreamerPlayer, clock_time};
@@ -69,6 +70,9 @@ macro_rules! notify {
 
 pub struct GStreamerMediaSource {
     source: gst_mse::MediaSource,
+    /// The `msesrc`, which counts the tracks of the initialization segments
+    /// received so far.
+    mse_src: gst_mse::MseSrc,
 }
 
 impl GStreamerMediaSource {
@@ -91,7 +95,7 @@ impl GStreamerMediaSource {
         let cb = callback;
         source.connect_on_source_close(move |_| notify!(cb, MediaSourceEvent::SourceClose));
         source.attach(&mse_src);
-        Ok(Self { source })
+        Ok(Self { source, mse_src })
     }
 }
 
@@ -155,6 +159,28 @@ impl MediaSourceHandle for GStreamerMediaSource {
             return None;
         }
         Some(start.seconds_f64()..end.seconds_f64())
+    }
+
+    fn tracks(&self) -> Vec<MediaSourceTrack> {
+        // mselib keeps its tracks private; the msesrc counts them by type,
+        // updated before the append that delivered an initialization segment
+        // completes. Tracks are never removed, so the n-th track of a type
+        // keeps its id. The spec has the user agent generate the ids anyway.
+        // The caps, and with them the video size, are not exposed.
+        let kinds = [
+            (MediaSourceTrackKind::Audio, "audio", self.mse_src.n_audio()),
+            (MediaSourceTrackKind::Video, "video", self.mse_src.n_video()),
+            (MediaSourceTrackKind::Text, "text", self.mse_src.n_text()),
+        ];
+        kinds
+            .into_iter()
+            .flat_map(|(kind, name, count)| {
+                (0..count).map(move |index| MediaSourceTrack {
+                    id: format!("{name}{index}"),
+                    kind,
+                })
+            })
+            .collect()
     }
 }
 
