@@ -94,6 +94,25 @@ pub enum SourceBufferEvent {
 /// Buffered time ranges, in seconds.
 pub type BufferedRanges = Vec<Range<f64>>;
 
+/// <https://w3c.github.io/media-source/#init-segment>
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub enum MediaSourceTrackKind {
+    Audio,
+    Video,
+    Text,
+}
+
+/// A track described by an initialization segment.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct MediaSourceTrack {
+    /// Unique within the media source, and stable across calls.
+    pub id: String,
+    pub kind: MediaSourceTrackKind,
+    /// The width and height of a video track, when the initialization
+    /// segment gives them.
+    pub video_size: Option<(u32, u32)>,
+}
+
 /// A media source attached to a player. Dropping the handle detaches it.
 ///
 /// <https://w3c.github.io/media-source/#mediasource>
@@ -131,6 +150,13 @@ pub trait MediaSourceHandle: Send {
 
     /// The range set with `set_live_seekable_range`, if any.
     fn live_seekable_range(&self) -> Option<Range<f64>>;
+
+    /// The tracks of every initialization segment received so far, over all
+    /// source buffers, in the order they were found. The DOM creates the
+    /// media element's AudioTrack and VideoTrack objects from these.
+    ///
+    /// <https://w3c.github.io/media-source/#sourcebuffer-init-segment-received> (step 5)
+    fn tracks(&self) -> Vec<MediaSourceTrack>;
 }
 
 /// One source buffer of an attached media source.

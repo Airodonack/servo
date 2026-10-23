@@ -10,7 +10,7 @@
 //! only forward calls and relay signals as events.
 
 use std::ops::Range;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use glib::translate::{FromGlibPtrNone, ToGlibPtr};
@@ -19,7 +19,8 @@ use gstreamer_mse as gst_mse;
 use servo_base::generic_channel::GenericCallback;
 use servo_media_player::media_source::{
     AppendMode, BufferedRanges, EndOfStreamError, MediaSourceError, MediaSourceEvent,
-    MediaSourceHandle, MediaSourceReadyState, SourceBufferEvent, SourceBufferHandle,
+    MediaSourceHandle, MediaSourceReadyState, MediaSourceTrack, MediaSourceTrackKind,
+    SourceBufferEvent, SourceBufferHandle,
 };
 
 static NEXT_SOURCE_BUFFER_ID: AtomicUsize = AtomicUsize::new(0);
@@ -55,6 +56,9 @@ macro_rules! notify {
 
 pub struct GStreamerMediaSource {
     source: gst_mse::MediaSource,
+    /// The `msesrc`, which counts the tracks of the initialization segments
+    /// received so far.
+    mse_src: gst_mse::MseSrc,
 }
 
 impl GStreamerMediaSource {
@@ -69,7 +73,7 @@ impl GStreamerMediaSource {
             .downcast::<gst_mse::MseSrc>()
             .map_err(|_| MediaSourceError::Backend("source element is not a msesrc".into()))?;
         let source = gst_mse::MediaSource::new();
-        let callback = std::sync::Arc::new(Mutex::new(callback));
+        let callback = Arc::new(Mutex::new(callback));
         let cb = callback.clone();
         source.connect_on_source_open(move |_| notify!(cb, MediaSourceEvent::SourceOpen));
         let cb = callback.clone();
@@ -77,7 +81,7 @@ impl GStreamerMediaSource {
         let cb = callback;
         source.connect_on_source_close(move |_| notify!(cb, MediaSourceEvent::SourceClose));
         source.attach(&mse_src);
-        Ok(Self { source })
+        Ok(Self { source, mse_src })
     }
 }
 
@@ -164,6 +168,30 @@ impl MediaSourceHandle for GStreamerMediaSource {
         }
         Some(start.seconds_f64()..end.seconds_f64())
     }
+
+    fn tracks(&self) -> Vec<MediaSourceTrack> {
+        // mselib keeps its tracks private; the msesrc counts them by type,
+        // updated before the append that delivered an initialization segment
+        // completes. Tracks are never removed, so the n-th track of a type
+        // keeps its id. The spec has the user agent generate the ids anyway.
+        // The caps, and with them the video size, are not exposed, so the
+        // size only becomes known with the first frame.
+        let kinds = [
+            (MediaSourceTrackKind::Audio, "audio", self.mse_src.n_audio()),
+            (MediaSourceTrackKind::Video, "video", self.mse_src.n_video()),
+            (MediaSourceTrackKind::Text, "text", self.mse_src.n_text()),
+        ];
+        kinds
+            .into_iter()
+            .flat_map(|(kind, name, count)| {
+                (0..count).map(move |index| MediaSourceTrack {
+                    id: format!("{name}{index}"),
+                    kind,
+                    video_size: None,
+                })
+            })
+            .collect()
+    }
 }
 
 /// The handle id is kept on the GObject so that `remove_source_buffer` can
@@ -196,7 +224,7 @@ impl GStreamerSourceBuffer {
         let id = NEXT_SOURCE_BUFFER_ID.fetch_add(1, Ordering::Relaxed);
         // SAFETY: the key is private to this module and the value is a `usize`.
         unsafe { buffer.set_data(SOURCE_BUFFER_ID_KEY, id) };
-        let callback = std::sync::Arc::new(Mutex::new(callback));
+        let callback = Arc::new(Mutex::new(callback));
         let cb = callback.clone();
         buffer.connect_on_update_start(move |_| notify!(cb, SourceBufferEvent::UpdateStart));
         let cb = callback.clone();

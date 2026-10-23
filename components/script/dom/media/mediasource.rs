@@ -341,18 +341,50 @@ impl MediaSource {
     }
 
     /// Initialization segment received, for a buffer whose first one the
-    /// backend has processed: it joins activeSourceBuffers and the duration
-    /// gets its initial value.
+    /// backend has processed.
     ///
-    /// <https://w3c.github.io/media-source/#dfn-initialization-segment-received>
-    pub(crate) fn activate_source_buffer(&self, buffer: &SourceBuffer) {
-        buffer.set_active(true);
-        // Step 8. Add the SourceBuffer to activeSourceBuffers and queue
-        // addsourcebuffer at it.
-        self.active_source_buffers.add(buffer);
-        // Step 5. If the duration attribute is NaN, set it from the
-        // initialization segment.
+    /// <https://w3c.github.io/media-source/#sourcebuffer-init-segment-received>
+    pub(crate) fn first_initialization_segment_received(
+        &self,
+        cx: &mut JSContext,
+        buffer: &SourceBuffer,
+    ) {
+        // Step 1. Update the duration attribute if it currently equals NaN.
         self.refresh_duration();
+        let element = self.media_element.get();
+        // Step 5. For each audio, video and text track in the initialization
+        // segment, create the track on the media element. The backend lists
+        // the tracks of all buffers; those the element already has came from
+        // another buffer's initialization segment.
+        let tracks = self
+            .handle
+            .borrow()
+            .as_ref()
+            .map(|handle| handle.tracks())
+            .unwrap_or_default();
+        if let Some(element) = element.as_ref() {
+            element.add_media_source_tracks(cx, &tracks);
+        }
+        // Step 5.4. If active track flag equals true, add this SourceBuffer
+        // to activeSourceBuffers and queue addsourcebuffer at it.
+        buffer.set_active(true);
+        self.active_source_buffers.add(buffer);
+        // Step 8. If each object in sourceBuffers of the parent media source
+        // has [[first initialization segment received flag]] equal to true,
+        // and the HTMLMediaElement's readyState attribute is HAVE_NOTHING,
+        // then set it to HAVE_METADATA.
+        // Step 7, which drops a readyState above HAVE_CURRENT_DATA back to
+        // HAVE_METADATA when a buffer added during playback gets its first
+        // initialization segment, is not implemented: nothing would raise
+        // the readyState again afterwards.
+        let all_received = self
+            .source_buffers
+            .buffers()
+            .iter()
+            .all(|buffer| buffer.first_initialization_segment_received());
+        if all_received && let Some(element) = element {
+            element.media_source_metadata_received(cx, &tracks);
+        }
     }
 
     /// Takes the duration mselib derived from the appended data when script
