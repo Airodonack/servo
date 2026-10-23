@@ -3311,17 +3311,16 @@ impl HTMLMediaElement {
     ///
     /// <https://w3c.github.io/media-source/#duration-change-algorithm> (step 5)
     pub(crate) fn media_source_duration_changed(&self, duration: f64) {
-        let duration = if duration.is_finite() && duration >= 0.0 {
-            Some(Duration::from_secs_f64(duration))
-        } else {
-            None
-        };
-        self.playback_duration_changed(duration);
+        // In seconds, not as a Duration: a page may set a finite duration larger than a
+        // Duration holds.
+        self.duration_changed(duration);
     }
 
     fn playback_duration_changed(&self, duration: Option<Duration>) {
-        let duration = duration.map_or(f64::INFINITY, |duration| duration.as_secs_f64());
+        self.duration_changed(duration.map_or(f64::INFINITY, |duration| duration.as_secs_f64()));
+    }
 
+    fn duration_changed(&self, duration: f64) {
         if self.duration.get() == duration {
             return;
         }

@@ -23,6 +23,8 @@ use servo_media_player::media_source::{
     SourceBufferEvent, SourceBufferHandle,
 };
 
+use crate::player::clock_time;
+
 static NEXT_SOURCE_BUFFER_ID: AtomicUsize = AtomicUsize::new(0);
 
 fn map_error(error: glib::Error) -> MediaSourceError {
@@ -36,9 +38,6 @@ fn map_error(error: glib::Error) -> MediaSourceError {
     }
 }
 
-fn clock_time(seconds: f64) -> gstreamer::ClockTime {
-    gstreamer::ClockTime::from_nseconds((seconds.max(0.0) * 1_000_000_000.0) as u64)
-}
 
 fn seconds(time: Option<gstreamer::ClockTime>) -> Option<f64> {
     time.map(|time| time.seconds_f64())
@@ -357,9 +356,14 @@ impl SourceBufferHandle for GStreamerSourceBuffer {
     }
 
     fn remove(&self, start: f64, end: Option<f64>) -> Result<(), MediaSourceError> {
-        // `None` is positive infinity: mselib takes it as "to the end".
+        // `None` is positive infinity: mselib takes it as "to the end". So is an end beyond
+        // what a GstClockTime holds, which would otherwise clamp to the same time as a start
+        // that far out, and mselib refuses an empty range.
+        let end = end
+            .map(clock_time)
+            .filter(|end| *end != gstreamer::ClockTime::MAX);
         self.buffer
-            .remove(clock_time(start), end.map(clock_time))
+            .remove(clock_time(start), end)
             .map_err(map_error)
     }
 
