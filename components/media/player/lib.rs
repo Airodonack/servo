@@ -126,6 +126,13 @@ pub trait Player: Send + MediaInstance {
     fn playback_rate(&self) -> f64;
     fn push_data(&self, data: Vec<u8>) -> Result<(), PlayerError>;
     fn end_of_stream(&self) -> Result<(), PlayerError>;
+    /// Whether the backend has started fetching parts of the resource for itself, beyond the
+    /// data given to `push_data` (an adaptive streaming demuxer downloading playlists and
+    /// segments). Those requests did not go through Servo's fetch, so their responses are not
+    /// known to be CORS-same-origin.
+    fn fetches_resource_parts(&self) -> bool {
+        false
+    }
     /// Get the list of time ranges in seconds that have been buffered.
     fn buffered(&self) -> Vec<Range<f64>>;
     /// Set the stream to be played by the player.
