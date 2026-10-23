@@ -36,6 +36,14 @@ class Base:
         raise NotImplementedError("GStreamer bootstrap support is not yet available for your OS.")
 
     def is_gstreamer_installed(self, target: BuildTarget) -> bool:
+        return self.has_pkg_config_module(target, "gstreamer-1.0", "1.18")
+
+    def is_gstreamer_mse_installed(self, target: BuildTarget) -> bool:
+        """Whether GStreamer's mselib, which Media Source Extensions need, is
+        installed. It came with GStreamer 1.24."""
+        return self.has_pkg_config_module(target, "gstreamer-mse-1.0", "1.24")
+
+    def has_pkg_config_module(self, target: BuildTarget, module: str, min_version: str) -> bool:
         gstreamer_root = self.gstreamer_root(target)
         if gstreamer_root:
             pkg_config = os.path.join(gstreamer_root, "bin", "pkg-config")
@@ -45,7 +53,7 @@ class Base:
         try:
             return (
                 subprocess.call(
-                    [pkg_config, "--atleast-version=1.18", "gstreamer-1.0"],
+                    [pkg_config, f"--atleast-version={min_version}", module],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                 )

@@ -815,6 +815,9 @@ class CommandBase(object):
             features += list(self.features)
             if self.enable_media:
                 features.append("media-gstreamer")
+                # Media Source Extensions need mselib, which GStreamer 1.24 added.
+                if platform.is_gstreamer_mse_installed(self.target):
+                    features.append("media-gstreamer-mse")
             if self.config["build"]["debug-mozjs"] or debug_mozjs:
                 features.append("debugmozjs")
 
