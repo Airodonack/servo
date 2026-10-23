@@ -291,6 +291,7 @@ impl SourceBuffer {
                 self.updating.set(false);
                 self.queue_event("error");
                 self.queue_event("updateend");
+                self.media_source.append_error(cx);
             },
             SourceBufferEvent::Abort => {
                 self.updating.set(false);
