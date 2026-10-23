@@ -117,6 +117,9 @@ impl Backend for OhosBackend {
             StreamType::Stream => {
                 warn!("Stream Type currently not supported!");
             },
+            StreamType::MediaSource => {
+                warn!("Media Source Extensions currently not supported!");
+            },
             StreamType::Seekable => (),
         }
 
