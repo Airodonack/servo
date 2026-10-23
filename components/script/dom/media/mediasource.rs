@@ -2,15 +2,16 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::Cell;
-use std::sync::{Arc, Mutex};
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::sync::{Arc, Mutex, Weak};
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use js::rust::HandleObject;
 use mime::Mime;
 use script_bindings::cell::DomRefCell;
-use script_bindings::reflector::reflect_dom_object_with_proto;
+use script_bindings::reflector::reflect_weak_referenceable_dom_object_with_proto;
 use servo_base::generic_channel::GenericCallback;
 use servo_media::ServoMedia;
 use servo_media::player::Player;
@@ -30,6 +31,7 @@ use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot, MutNullableDom};
 use crate::dom::bindings::str::DOMString;
+use crate::dom::bindings::weakref::{WeakRef, WeakReferenceable};
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::htmlmediaelement::HTMLMediaElement;
@@ -43,6 +45,33 @@ use crate::tasks::task_source::SendableTaskSource;
 /// and only the end of the buffered ranges is known. web-platform-tests' media
 /// source tests assume the same bound for their media.
 const LONGEST_FRAME: f64 = 0.1;
+
+/// What a backend callback holds to reach a DOM object: a weak reference
+/// behind an `Arc` that only the DOM object owns, through
+/// [`BackendCallbackTarget::new`]. The callback keeps a `std::sync::Weak`, so
+/// it never keeps the object alive (the object owns the backend, which owns
+/// the callback, and a strong reference back would keep both for good), and
+/// the `WeakRef`, which is not thread-safe, is only used and dropped on the
+/// script thread.
+pub(crate) struct BackendCallbackTarget<T: WeakReferenceable>(WeakRef<T>);
+
+#[expect(unsafe_code)]
+unsafe impl<T: WeakReferenceable> Send for BackendCallbackTarget<T> {}
+
+impl<T: WeakReferenceable> BackendCallbackTarget<T> {
+    /// The strong reference, for `object` to keep, and the weak one, for the
+    /// callback.
+    pub(crate) fn new(object: &T) -> (Arc<Mutex<Self>>, Weak<Mutex<Self>>) {
+        let target = Arc::new(Mutex::new(Self(WeakRef::new(object))));
+        let weak = Arc::downgrade(&target);
+        (target, weak)
+    }
+
+    /// On the script thread: the object, if it is still alive.
+    pub(crate) fn root(target: &Weak<Mutex<Self>>) -> Option<DomRoot<T>> {
+        target.upgrade()?.lock().unwrap().0.root()
+    }
+}
 
 /// Maps a backend refusal to the exception the Media Source spec names.
 pub(crate) fn media_source_error(error: MediaSourceError) -> Error {
@@ -173,6 +202,10 @@ pub(crate) struct MediaSource {
     #[ignore_malloc_size_of = "servo_media"]
     #[no_trace]
     handle: DomRefCell<Option<Box<dyn MediaSourceHandle>>>,
+    /// What the backend's callback reaches this object through.
+    #[ignore_malloc_size_of = "Arc"]
+    #[no_trace]
+    callback_target: RefCell<Option<Arc<Mutex<BackendCallbackTarget<MediaSource>>>>>,
 }
 
 impl MediaSource {
@@ -188,6 +221,7 @@ impl MediaSource {
             duration: Cell::new(f64::NAN),
             media_element: Default::default(),
             handle: DomRefCell::new(None),
+            callback_target: RefCell::new(None),
         }
     }
 
@@ -198,9 +232,9 @@ impl MediaSource {
     ) -> DomRoot<MediaSource> {
         let source_buffers = SourceBufferList::new(cx, global);
         let active_source_buffers = SourceBufferList::new(cx, global);
-        reflect_dom_object_with_proto(
+        reflect_weak_referenceable_dom_object_with_proto(
             cx,
-            Box::new(MediaSource::new_inherited(
+            Rc::new(MediaSource::new_inherited(
                 &source_buffers,
                 &active_source_buffers,
             )),
@@ -248,7 +282,8 @@ impl MediaSource {
                 "The media source is already attached".into(),
             )));
         }
-        let this = Trusted::new(self);
+        let (target, weak_target) = BackendCallbackTarget::new(self);
+        *self.callback_target.borrow_mut() = Some(target);
         let task_source: SendableTaskSource = self
             .global()
             .task_manager()
@@ -258,9 +293,11 @@ impl MediaSource {
             let Ok(event) = message else {
                 return;
             };
-            let this = this.clone();
+            let weak_target = weak_target.clone();
             task_source.queue(task!(media_source_event: move |cx| {
-                this.root().handle_backend_event(cx, event);
+                if let Some(this) = BackendCallbackTarget::root(&weak_target) {
+                    this.handle_backend_event(cx, event);
+                }
             }));
         })
         .map_err(|_| Error::InvalidState(Some("Could not create a callback".into())))?;
@@ -289,6 +326,7 @@ impl MediaSource {
         self.source_buffers.clear(cx);
         // Dropping the handle detaches the backend side.
         *self.handle.borrow_mut() = None;
+        *self.callback_target.borrow_mut() = None;
         self.media_element.set(None);
         // Step 7. Queue a task to fire an event named sourceclose at the MediaSource.
         self.queue_event("sourceclose");
