@@ -680,6 +680,16 @@ enum PlaybackPositionWasMoved {
     NormalPlayback,
 }
 
+/// How a new AudioTrack or VideoTrack is announced. The MSE initialization segment received
+/// algorithm queues addtrack ("This should trigger AudioTrackList logic to queue a task to fire
+/// an event named addtrack"), so that page code cannot run in the middle of it.
+/// <https://w3c.github.io/media-source/#sourcebuffer-init-segment-received>
+#[derive(Clone, Copy, PartialEq)]
+enum AddTrackEvent {
+    Fire,
+    Queue,
+}
+
 impl HTMLMediaElement {
     pub(crate) fn new_inherited(
         tag_name: LocalName,
@@ -2875,7 +2885,7 @@ impl HTMLMediaElement {
                 0 => DOMString::from_static("main"),
                 _ => DOMString::new(),
             };
-            self.add_audio_track(cx, DOMString::new(), kind);
+            self.add_audio_track(cx, DOMString::new(), kind, AddTrackEvent::Fire);
         }
 
         // => "If the media resource is found to have a video track"
@@ -2884,7 +2894,7 @@ impl HTMLMediaElement {
                 0 => DOMString::from_static("main"),
                 _ => DOMString::new(),
             };
-            self.add_video_track(cx, DOMString::new(), kind);
+            self.add_video_track(cx, DOMString::new(), kind, AddTrackEvent::Fire);
         }
 
         // => "Once enough of the media data has been fetched to determine the duration..."
@@ -2901,7 +2911,13 @@ impl HTMLMediaElement {
 
     /// <https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list>
     /// => "If the media resource is found to have an audio track"
-    fn add_audio_track(&self, cx: &mut JSContext, id: DOMString, kind: DOMString) {
+    fn add_audio_track(
+        &self,
+        cx: &mut JSContext,
+        id: DOMString,
+        kind: DOMString,
+        addtrack: AddTrackEvent,
+    ) {
         let audio_track_list = self.AudioTracks(cx);
 
         // Step 1. Create an AudioTrack object to represent the audio track.
@@ -2948,6 +2964,31 @@ impl HTMLMediaElement {
 
         // Step 7. Fire an event named addtrack at this AudioTrackList object, using TrackEvent,
         // with the track attribute initialized to the new AudioTrack object.
+        if addtrack == AddTrackEvent::Queue {
+            let this = Trusted::new(self);
+            let generation_id = self.generation_id.get();
+            let list = Trusted::new(&*audio_track_list);
+            let track = Trusted::new(&*audio_track);
+            self.owner_global()
+                .task_manager()
+                .media_element_task_source()
+                .queue(task!(audio_addtrack: move |cx| {
+                    if generation_id != this.root().generation_id.get() {
+                        return;
+                    }
+                    let list = list.root();
+                    let event = TrackEvent::new(
+                        cx,
+                        list.global().as_window(),
+                        atom!("addtrack"),
+                        false,
+                        false,
+                        &Some(VideoTrackOrAudioTrackOrTextTrack::AudioTrack(track.root())),
+                    );
+                    event.upcast::<Event>().fire(cx, list.upcast::<EventTarget>());
+                }));
+            return;
+        }
         let event = TrackEvent::new(
             cx,
             self.global().as_window(),
@@ -2964,7 +3005,13 @@ impl HTMLMediaElement {
 
     /// <https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list>
     /// => "If the media resource is found to have a video track"
-    fn add_video_track(&self, cx: &mut JSContext, id: DOMString, kind: DOMString) {
+    fn add_video_track(
+        &self,
+        cx: &mut JSContext,
+        id: DOMString,
+        kind: DOMString,
+        addtrack: AddTrackEvent,
+    ) {
         let video_track_list = self.VideoTracks(cx);
 
         // Step 1. Create a VideoTrack object to represent the video track.
@@ -3012,6 +3059,31 @@ impl HTMLMediaElement {
 
         // Step 7. Fire an event named addtrack at this VideoTrackList object, using TrackEvent,
         // with the track attribute initialized to the new VideoTrack object.
+        if addtrack == AddTrackEvent::Queue {
+            let this = Trusted::new(self);
+            let generation_id = self.generation_id.get();
+            let list = Trusted::new(&*video_track_list);
+            let track = Trusted::new(&*video_track);
+            self.owner_global()
+                .task_manager()
+                .media_element_task_source()
+                .queue(task!(video_addtrack: move |cx| {
+                    if generation_id != this.root().generation_id.get() {
+                        return;
+                    }
+                    let list = list.root();
+                    let event = TrackEvent::new(
+                        cx,
+                        list.global().as_window(),
+                        atom!("addtrack"),
+                        false,
+                        false,
+                        &Some(VideoTrackOrAudioTrackOrTextTrack::VideoTrack(track.root())),
+                    );
+                    event.upcast::<Event>().fire(cx, list.upcast::<EventTarget>());
+                }));
+            return;
+        }
         let event = TrackEvent::new(
             cx,
             self.global().as_window(),
@@ -3027,7 +3099,8 @@ impl HTMLMediaElement {
     }
 
     /// The tracks of a MediaSource's initialization segments that the element does not have
-    /// yet: each gets an AudioTrack or VideoTrack, as if found in the media resource.
+    /// yet: each gets an AudioTrack or VideoTrack, as if found in the media resource. addtrack
+    /// is queued, so page code runs only once the rest of the algorithm has finished.
     ///
     /// <https://w3c.github.io/media-source/#sourcebuffer-init-segment-received> (step 5)
     pub(crate) fn add_media_source_tracks(&self, cx: &mut JSContext, tracks: &[MediaSourceTrack]) {
@@ -3043,7 +3116,7 @@ impl HTMLMediaElement {
                         .filter_map(|index| list.item(index))
                         .any(|existing| existing.id() == id);
                     if !known {
-                        self.add_audio_track(cx, id, kind);
+                        self.add_audio_track(cx, id, kind, AddTrackEvent::Queue);
                     }
                 },
                 MediaSourceTrackKind::Video => {
@@ -3052,7 +3125,7 @@ impl HTMLMediaElement {
                         .filter_map(|index| list.item(index))
                         .any(|existing| existing.id() == id);
                     if !known {
-                        self.add_video_track(cx, id, kind);
+                        self.add_video_track(cx, id, kind, AddTrackEvent::Queue);
                     }
                 },
                 // Text tracks of initialization segments are not exposed yet.
