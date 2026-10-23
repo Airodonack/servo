@@ -143,20 +143,6 @@ impl SourceBuffer {
         self.handle.borrow()
     }
 
-    /// Removes the data between `start` and `end` because the media source's
-    /// duration was lowered. Unlike `remove()`, this is not an update the
-    /// page sees: no updating flag, no events.
-    ///
-    /// <https://w3c.github.io/media-source/#duration-change-algorithm> (step 4)
-    pub(crate) fn truncate(&self, start: f64, end: f64) {
-        let end = if end.is_infinite() { None } else { Some(end) };
-        if let Some(handle) = self.handle.borrow().as_ref() &&
-            let Err(error) = handle.remove(start, end)
-        {
-            warn!("Could not truncate the source buffer: {error:?}");
-        }
-    }
-
     pub(crate) fn mark_removed(&self) {
         self.removed.set(true);
         self.updating.set(false);
