@@ -202,6 +202,7 @@ class MachCommands(CommandBase):
             "servo-hyper-serde",
             "servo-layout",
             "servo-layout-api",
+            "servo-media-gstreamer",
             "servo",
             "servo-metrics",
             "servo-net",
