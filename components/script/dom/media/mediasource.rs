@@ -363,7 +363,7 @@ impl MediaSource {
             .map(|handle| handle.tracks())
             .unwrap_or_default();
         if let Some(element) = element.as_ref() {
-            element.add_media_source_tracks(cx, &tracks);
+            buffer.set_track_ids(element.add_media_source_tracks(cx, &tracks));
         }
         // Step 5.4. If active track flag equals true, add this SourceBuffer
         // to activeSourceBuffers and queue addsourcebuffer at it.
@@ -678,6 +678,11 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         // update-abort and updateend events.
         if source_buffer.updating() {
             source_buffer.abort_update();
+        }
+        // Steps 3-5. Remove the audio, video and text tracks the buffer created from the media
+        // element's lists, queueing removetrack (and change for an enabled or selected one).
+        if let Some(element) = self.media_element.get() {
+            element.remove_media_source_tracks(&source_buffer.take_track_ids());
         }
         // Steps 3-9. Remove the tracks, remove from activeSourceBuffers and
         // sourceBuffers, with their events, and destroy the resources.

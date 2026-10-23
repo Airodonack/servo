@@ -51,6 +51,9 @@ pub(crate) struct SourceBuffer {
     active: Cell<bool>,
     /// <https://w3c.github.io/media-source/#dfn-first-initialization-segment-received-flag>
     first_initialization_segment_received: Cell<bool>,
+    /// The ids of the media element's AudioTrack and VideoTrack objects that this buffer's
+    /// initialization segment created, which removeSourceBuffer removes again.
+    track_ids: DomRefCell<Vec<String>>,
     /// Whether the update in progress is a remove, which abort() must refuse.
     removing: Cell<bool>,
     /// Whether the backend reported success (update) for the update in
@@ -80,6 +83,7 @@ impl SourceBuffer {
             append_window_end: Cell::new(f64::INFINITY),
             active: Cell::new(false),
             first_initialization_segment_received: Cell::new(false),
+            track_ids: DomRefCell::new(vec![]),
             removing: Cell::new(false),
             update_reported: Cell::new(false),
             backend_update_started: Cell::new(false),
@@ -180,6 +184,14 @@ impl SourceBuffer {
 
     pub(crate) fn first_initialization_segment_received(&self) -> bool {
         self.first_initialization_segment_received.get()
+    }
+
+    pub(crate) fn set_track_ids(&self, ids: Vec<String>) {
+        *self.track_ids.borrow_mut() = ids;
+    }
+
+    pub(crate) fn take_track_ids(&self) -> Vec<String> {
+        std::mem::take(&mut *self.track_ids.borrow_mut())
     }
 
     pub(crate) fn set_active(&self, active: bool) {
