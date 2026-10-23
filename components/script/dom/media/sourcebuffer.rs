@@ -473,10 +473,17 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
 
     /// <https://w3c.github.io/media-source/#dom-sourcebuffer-appendbuffer>
     fn AppendBuffer(&self, _cx: &mut JSContext, data: ArrayBufferViewOrArrayBuffer) -> ErrorResult {
-        // Prepare append algorithm, steps 1-3: removed or updating means
-        // InvalidStateError, and an ended media source is reopened.
+        // Prepare append algorithm, steps 1-2: removed or updating means
+        // InvalidStateError.
+        self.check_state(false)?;
+        // Steps 3-4. If the HTMLMediaElement's error attribute is not null,
+        // then throw an InvalidStateError exception.
+        if self.media_source.element_has_error() {
+            return Err(Error::InvalidState(None));
+        }
+        // Step 5. If the parent media source is "ended", reopen it.
         self.check_state(true)?;
-        // Prepare append, step 5-6. The backend evicts what it must and
+        // Prepare append, steps 6-7. The backend evicts what it must and
         // refuses with QuotaExceededError when it cannot.
         let bytes = match data {
             ArrayBufferViewOrArrayBuffer::ArrayBufferView(view) => {
@@ -546,14 +553,17 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
         if type_.is_empty() {
             return Err(Error::Type(c"The content type is empty".to_owned()));
         }
-        // Steps 2-4. Removed or updating: InvalidStateError; ended: reopen.
-        self.check_state(true)?;
-        // Step 5. If type contains a MIME type that is not supported, then
+        // Steps 2-3. Removed or updating: InvalidStateError.
+        self.check_state(false)?;
+        // Step 4. If type contains a MIME type that is not supported, then
         // throw a NotSupportedError exception.
         if !crate::dom::mediasource::is_valid_media_source_type(&type_.str()) {
             return Err(Error::NotSupported(None));
         }
-        // Steps 6-9. The backend checks the codecs and switches its parser.
+        // Step 5. If the parent media source is "ended", reopen it.
+        self.check_state(true)?;
+        // Steps 6-9. The backend switches its parser to the new type, or
+        // refuses with NotSupportedError when it cannot change types at all.
         self.with_handle(|handle| handle.change_type(&type_.str()))?
             .map_err(media_source_error)
     }

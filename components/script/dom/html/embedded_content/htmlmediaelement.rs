@@ -2086,7 +2086,7 @@ impl HTMLMediaElement {
             }));
     }
 
-    fn in_error_state(&self) -> bool {
+    pub(crate) fn in_error_state(&self) -> bool {
         self.error.get().is_some()
     }
 
