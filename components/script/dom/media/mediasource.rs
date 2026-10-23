@@ -266,6 +266,14 @@ impl MediaSource {
         self.duration.get()
     }
 
+    /// Whether the media element this is attached to has an error: the
+    /// prepare append algorithm's recent element error.
+    pub(crate) fn element_has_error(&self) -> bool {
+        self.media_element
+            .get()
+            .is_some_and(|element| element.in_error_state())
+    }
+
     pub(crate) fn is_attached(&self) -> bool {
         self.handle.borrow().is_some()
     }
