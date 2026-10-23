@@ -3317,6 +3317,24 @@ impl HTMLMediaElement {
             .update_title(title.unwrap_or(window.get_url().into_string()));
     }
 
+    /// The attached MediaSource ended its stream with a network error or a
+    /// decode error.
+    ///
+    /// <https://w3c.github.io/media-source/#end-of-stream-algorithm> (step 3)
+    pub(crate) fn media_source_ended_with_error(&self, cx: &mut JSContext, network: bool) {
+        // => "If the HTMLMediaElement's readyState attribute equals HAVE_NOTHING": the media
+        // data cannot be fetched at all, or cannot be rendered at all.
+        if self.ready_state.get() == ReadyState::HaveNothing {
+            self.media_data_processing_failure_steps(cx);
+        } else if network {
+            // => "If the connection is interrupted after some media data has been received"
+            self.media_data_processing_fatal_steps(MEDIA_ERR_NETWORK, cx);
+        } else {
+            // => "If the media data is corrupted"
+            self.media_data_processing_fatal_steps(MEDIA_ERR_DECODE, cx);
+        }
+    }
+
     /// The attached MediaSource's duration changed: the media element's
     /// duration follows it.
     ///
