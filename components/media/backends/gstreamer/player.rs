@@ -116,6 +116,21 @@ impl AsRef<[f32]> for GStreamerAudioChunk {
     }
 }
 
+/// Seconds as a GstClockTime. NaN and negative times become zero. Times beyond what a
+/// GstClockTime holds (about 584 years) become the largest one: the nanosecond count would
+/// otherwise saturate to GST_CLOCK_TIME_NONE, which ClockTime::from_nseconds refuses with a
+/// panic, and a page can seek that far into media that claims to last that long.
+pub(crate) fn clock_time(seconds: f64) -> gstreamer::ClockTime {
+    let nanoseconds = seconds * 1_000_000_000.0;
+    if nanoseconds.is_nan() || nanoseconds <= 0.0 {
+        gstreamer::ClockTime::ZERO
+    } else if nanoseconds >= gstreamer::ClockTime::MAX.nseconds() as f64 {
+        gstreamer::ClockTime::MAX
+    } else {
+        gstreamer::ClockTime::from_nseconds(nanoseconds as u64)
+    }
+}
+
 #[derive(PartialEq)]
 enum PlayerSource {
     Seekable(ServoSrc),
@@ -270,9 +285,7 @@ impl PlayerInner {
             return Err(PlayerError::SeekOutOfRange);
         }
 
-        let time = time * 1_000_000_000.;
-        self.player
-            .seek(gstreamer::ClockTime::from_nseconds(time as u64));
+        self.player.seek(clock_time(time));
         Ok(())
     }
 
@@ -1063,5 +1076,43 @@ impl Drop for GStreamerPlayer {
                 tx_ack,
             });
         let _ = rx_ack.recv();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use gstreamer::ClockTime;
+
+    use super::clock_time;
+
+    /// The seconds that ClockTime::MAX holds, as the f64 nearest to it.
+    fn max_seconds() -> f64 {
+        ClockTime::MAX.nseconds() as f64 / 1_000_000_000.0
+    }
+
+    #[test]
+    fn clock_time_of_nan_and_negative_times_is_zero() {
+        assert_eq!(clock_time(f64::NAN), ClockTime::ZERO);
+        assert_eq!(clock_time(-1.0), ClockTime::ZERO);
+        assert_eq!(clock_time(-0.0), ClockTime::ZERO);
+        assert_eq!(clock_time(f64::NEG_INFINITY), ClockTime::ZERO);
+        assert_eq!(clock_time(0.0), ClockTime::ZERO);
+    }
+
+    #[test]
+    fn clock_time_of_an_ordinary_time() {
+        assert_eq!(clock_time(1.5), ClockTime::from_mseconds(1_500));
+        // 1e19 nanoseconds, exact in an f64, below ClockTime::MAX (about 1.8e19).
+        assert_eq!(clock_time(1e10), ClockTime::from_seconds(10_000_000_000));
+    }
+
+    #[test]
+    fn clock_time_past_the_largest_clock_time_is_the_largest() {
+        // Each of these turns into GST_CLOCK_TIME_NONE through a plain `as u64`
+        // conversion, which ClockTime::from_nseconds refuses with a panic.
+        assert_eq!(clock_time(max_seconds()), ClockTime::MAX);
+        assert_eq!(clock_time(18_446_744_074.0), ClockTime::MAX);
+        assert_eq!(clock_time(1e20), ClockTime::MAX);
+        assert_eq!(clock_time(f64::INFINITY), ClockTime::MAX);
     }
 }
