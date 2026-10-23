@@ -357,17 +357,18 @@ impl MediaSource {
             return;
         }
         match event {
-            MediaSourceEvent::SourceOpen => self.open(),
-            MediaSourceEvent::SourceEnded => {
-                // The ended transition initiated from script (endOfStream)
-                // is reported immediately there; only backend-initiated
-                // ones (a decode error during an append) get reported here.
-                if self.ready_state.get() == ReadyState::Open {
-                    self.ready_state.set(ReadyState::Ended);
-                    self.refresh_duration();
-                    self.queue_event("sourceended");
+            // The attachment's open transition. Reopening an ended media
+            // source is done by the DOM, which the backend reports as well.
+            MediaSourceEvent::SourceOpen => {
+                if self.ready_state.get() == ReadyState::Closed {
+                    self.open();
                 }
             },
+            // The DOM ends the stream itself: in endOfStream() and in the
+            // append error algorithm, when a SourceBuffer reports an error.
+            // The backend's report of either can arrive after the page has
+            // reopened the media source.
+            MediaSourceEvent::SourceEnded => {},
             MediaSourceEvent::SourceClose => {
                 if self.ready_state.get() != ReadyState::Closed {
                     self.ready_state.set(ReadyState::Closed);
@@ -522,6 +523,51 @@ impl MediaSource {
         // Step 5.1-5.2. If the initialization segment contains a duration,
         // use it; otherwise the duration is positive Infinity.
         self.set_duration_internal(duration.unwrap_or(f64::INFINITY));
+    }
+
+    /// End of stream algorithm, run on the DOM side. The backend has been
+    /// told already, or ended its side itself (an append error).
+    ///
+    /// <https://w3c.github.io/media-source/#end-of-stream-algorithm>
+    fn end_of_stream_steps(&self, cx: &mut JSContext, error: Option<EndOfStreamError>) {
+        // Steps 1-2. Change the readyState attribute value to "ended" and
+        // queue a task to fire an event named sourceended.
+        self.ready_state.set(ReadyState::Ended);
+        self.queue_event("sourceended");
+        match error {
+            // Step 3, error not set: run the duration change algorithm with
+            // the largest track buffer ranges end time across all
+            // SourceBuffer objects in sourceBuffers.
+            None => {
+                let largest_end_time = self
+                    .source_buffers
+                    .buffers()
+                    .iter()
+                    .flat_map(|buffer| buffer.buffered_ranges())
+                    .map(|(_, end)| end)
+                    .fold(0.0, f64::max);
+                if let Err(error) = self.change_duration(largest_end_time) {
+                    warn!("Could not set the duration at the end of stream: {error:?}");
+                }
+            },
+            // Error set to "network" or "decode": the media element's network
+            // or decode error steps.
+            Some(error) => {
+                if let Some(element) = self.media_element.get() {
+                    element.media_source_ended_with_error(cx, error == EndOfStreamError::Network);
+                }
+            },
+        }
+    }
+
+    /// Append error algorithm, step 5: run the end of stream algorithm with
+    /// the error parameter set to "decode".
+    ///
+    /// <https://w3c.github.io/media-source/#sourcebuffer-append-error>
+    pub(crate) fn append_error(&self, cx: &mut JSContext) {
+        if self.ready_state.get() == ReadyState::Open {
+            self.end_of_stream_steps(cx, Some(EndOfStreamError::Decode));
+        }
     }
 
     fn queue_event(&self, name: &str) {
@@ -817,35 +863,7 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
                 .end_of_stream(backend_error)
                 .map_err(media_source_error)?;
         }
-        // End of stream algorithm, steps 1-2: change the readyState attribute
-        // value to "ended" and queue a task to fire an event named
-        // sourceended.
-        self.ready_state.set(ReadyState::Ended);
-        self.queue_event("sourceended");
-        match error {
-            // Step 3, error not set: run the duration change algorithm with
-            // the largest track buffer ranges end time across all
-            // SourceBuffer objects in sourceBuffers.
-            None => {
-                let largest_end_time = self
-                    .source_buffers
-                    .buffers()
-                    .iter()
-                    .flat_map(|buffer| buffer.buffered_ranges())
-                    .map(|(_, end)| end)
-                    .fold(0.0, f64::max);
-                if let Err(error) = self.change_duration(largest_end_time) {
-                    warn!("Could not set the duration at the end of stream: {error:?}");
-                }
-            },
-            // Error set to "network" or "decode": the media element's network
-            // or decode error steps.
-            Some(error) => {
-                if let Some(element) = self.media_element.get() {
-                    element.media_source_ended_with_error(cx, error == EndOfStreamError::Network);
-                }
-            },
-        }
+        self.end_of_stream_steps(cx, error);
         Ok(())
     }
 

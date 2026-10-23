@@ -549,6 +549,11 @@ pub(crate) struct HTMLMediaElement {
     /// reached the end of the media resource. The backend's end of stream and, with a
     /// MediaSource, reaching its duration both report the end; the steps must run once.
     end_of_playback_reached: Cell<bool>,
+    /// Whether the attached MediaSource ended its stream with an error since the load
+    /// algorithm last ran. The backend reports the same failure as a player error, which
+    /// may arrive before the error attribute is set (it is set from a queued task before
+    /// HAVE_METADATA).
+    media_source_error_reported: Cell<bool>,
     /// <https://html.spec.whatwg.org/multipage/#dom-media-error>
     error: MutNullableDom<MediaError>,
     /// The MediaSource attached to this element, while one is.
@@ -709,6 +714,7 @@ impl HTMLMediaElement {
             generation_id: Cell::new(0),
             fired_loadeddata_event: Cell::new(false),
             end_of_playback_reached: Cell::new(false),
+            media_source_error_reported: Cell::new(false),
             error: Default::default(),
             media_source: Default::default(),
             paused: Cell::new(true),
@@ -2129,6 +2135,7 @@ impl HTMLMediaElement {
         // this invokation of the load algorithm.
         self.fired_loadeddata_event.set(false);
         self.end_of_playback_reached.set(false);
+        self.media_source_error_reported.set(false);
 
         // TODO Step 1. Set this element's is currently stalled to false.
 
@@ -2856,7 +2863,7 @@ impl HTMLMediaElement {
         // If we have already flagged an error condition while processing
         // the network response, we should silently skip any observable
         // errors originating while decoding the erroneous response.
-        if self.in_error_state() {
+        if self.in_error_state() || self.media_source_error_reported.get() {
             return;
         }
 
@@ -3322,6 +3329,7 @@ impl HTMLMediaElement {
     ///
     /// <https://w3c.github.io/media-source/#end-of-stream-algorithm> (step 3)
     pub(crate) fn media_source_ended_with_error(&self, cx: &mut JSContext, network: bool) {
+        self.media_source_error_reported.set(true);
         // => "If the HTMLMediaElement's readyState attribute equals HAVE_NOTHING": the media
         // data cannot be fetched at all, or cannot be rendered at all.
         if self.ready_state.get() == ReadyState::HaveNothing {
