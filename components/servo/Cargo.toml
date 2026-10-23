@@ -58,6 +58,8 @@ jitspew = ["script/jitspew"]
 js_backtrace = ["script/js_backtrace"]
 js_jit = ["script/js_jit"]
 media-gstreamer = ["servo-media-gstreamer", "gstreamer"]
+# Media Source Extensions through GStreamer's mselib; needs GStreamer 1.24.
+media-gstreamer-mse = ["media-gstreamer", "servo-media-gstreamer/mse"]
 
 # Allows multiprocess and ipc mode. If enabled this still needs the correct preference flags to use multi process mode.
 multiprocess = ["servo-base/multiprocess", "servo-constellation/multiprocess"]

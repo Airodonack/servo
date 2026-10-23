@@ -120,7 +120,7 @@ impl AsRef<[f32]> for GStreamerAudioChunk {
 /// Seconds as a GstClockTime. NaN and negative times become zero. Times beyond what a
 /// GstClockTime holds (about 584 years) become the largest one: the nanosecond count would
 /// otherwise saturate to GST_CLOCK_TIME_NONE, which ClockTime::from_nseconds refuses with a
-/// panic, and a page can seek that far into a stream of unknown duration.
+/// panic, and a page can pass such times (a seek, an MSE duration or timestamp).
 pub(crate) fn clock_time(seconds: f64) -> gstreamer::ClockTime {
     let nanoseconds = seconds * 1_000_000_000.0;
     if nanoseconds.is_nan() || nanoseconds <= 0.0 {
@@ -136,6 +136,8 @@ pub(crate) fn clock_time(seconds: f64) -> gstreamer::ClockTime {
 enum PlayerSource {
     Seekable(ServoSrc),
     Stream(ServoMediaStreamSrc),
+    /// The `mse` plugin's source element, attached to from `attach_media_source`.
+    MediaSource(gstreamer::Element),
 }
 
 struct PlayerInner {
@@ -195,7 +197,7 @@ impl PlayerInner {
     }
 
     pub fn set_playback_rate(&mut self, playback_rate: f64) -> Result<(), PlayerError> {
-        if self.stream_type != StreamType::Seekable {
+        if self.stream_type == StreamType::Stream {
             return Err(PlayerError::NonSeekableStream);
         }
 
@@ -275,10 +277,14 @@ impl PlayerInner {
     }
 
     pub fn seek(&mut self, time: f64) -> Result<(), PlayerError> {
-        if self.stream_type != StreamType::Seekable {
+        if self.stream_type == StreamType::Stream {
             return Err(PlayerError::NonSeekableStream);
         }
-        if let Some(ref metadata) = self.last_metadata &&
+        // With a MediaSource the duration is the MediaSource's, which the
+        // element has already clamped the time to; the pipeline's duration
+        // lags behind what has been appended.
+        if self.stream_type != StreamType::MediaSource &&
+            let Some(ref metadata) = self.last_metadata &&
             let Some(ref duration) = metadata.duration &&
             duration < &time::Duration::new(time as u64, 0)
         {
@@ -503,6 +509,19 @@ impl GStreamerPlayer {
         }
     }
 
+    /// The `msesrc` of a `StreamType::MediaSource` player's pipeline, which a
+    /// media source is attached to.
+    pub fn media_source_element(&self) -> Result<gstreamer::Element, PlayerError> {
+        // `setup` returns once `source-setup` has run, so the msesrc exists.
+        self.setup()?;
+        let inner = self.inner.borrow();
+        let inner = inner.as_ref().unwrap().lock().unwrap();
+        match inner.source {
+            Some(PlayerSource::MediaSource(ref element)) => Ok(element.clone()),
+            _ => Err(PlayerError::MediaSourceNotSupported),
+        }
+    }
+
     fn setup(&self) -> Result<(), PlayerError> {
         if self.inner.borrow().is_some() {
             return Ok(());
@@ -647,7 +666,9 @@ impl GStreamerPlayer {
                 })?;
                 "servosrc://".to_value()
             },
-            StreamType::MediaSource => return Err(PlayerError::MediaSourceNotSupported),
+            // The `mse` plugin's source element: a media source is attached to
+            // it in the `source-setup` handler.
+            StreamType::MediaSource => "mse://".to_value(),
         };
         player.set_property("uri", &uri);
 
@@ -853,6 +874,7 @@ impl GStreamerPlayer {
             let sender_clone = sender.clone();
             let is_ready_clone = self.is_ready.clone();
             let observer = self.observer.clone();
+
             pipeline.connect("source-setup", false, move |args| {
                 let source = args[1].get::<gstreamer::Element>().unwrap();
 
@@ -933,8 +955,13 @@ impl GStreamerPlayer {
                         });
                         PlayerSource::Stream(media_stream_src)
                     },
-                    // setup() refuses these players before setting a URI.
-                    StreamType::MediaSource => unreachable!(),
+                    StreamType::MediaSource => {
+                        let sender_clone = sender.clone();
+                        is_ready_clone.call_once(|| {
+                            let _ = notify!(sender_clone, Ok(()));
+                        });
+                        PlayerSource::MediaSource(source)
+                    },
                 };
 
                 inner.set_src(source);
@@ -1030,9 +1057,9 @@ impl Player for GStreamerPlayer {
 
     fn attach_media_source(
         &self,
-        _: GenericCallback<MediaSourceEvent>,
+        callback: GenericCallback<MediaSourceEvent>,
     ) -> Result<Box<dyn MediaSourceHandle>, PlayerError> {
-        Err(PlayerError::MediaSourceNotSupported)
+        crate::media_source::attach(self, callback)
     }
 
     fn set_download_buffering_enabled(&self, enable: bool) -> Result<(), PlayerError> {
