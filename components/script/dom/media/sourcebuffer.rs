@@ -10,7 +10,8 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_dom_object_with_cx;
 use servo_base::generic_channel::GenericCallback;
 use servo_media::player::media_source::{
-    AppendMode as BackendAppendMode, SourceBufferEvent, SourceBufferHandle,
+    AppendMode as BackendAppendMode, OperationId, SourceBufferEvent, SourceBufferHandle,
+    SourceBufferReport,
 };
 use stylo_atoms::Atom;
 
@@ -59,12 +60,9 @@ pub(crate) struct SourceBuffer {
     /// Whether the backend reported success (update) for the update in
     /// progress; updateend implies it on success.
     update_reported: Cell<bool>,
-    /// Whether the backend has reported the start of the update in progress.
-    /// Outcomes it reports before that belong to an earlier operation: mselib
-    /// (checked in 1.28.6) signals update and update-end every second while
-    /// a buffer is idle, and one of those can arrive after the next append
-    /// started.
-    backend_update_started: Cell<bool>,
+    /// The backend's number for the append or remove in progress. Reports of any
+    /// other operation are not this update's outcome.
+    operation: Cell<Option<OperationId>>,
     /// The backend side of this buffer. It holds the appended data and the
     /// buffered ranges, and reports the outcome of appends and removes.
     #[ignore_malloc_size_of = "servo_media"]
@@ -86,7 +84,7 @@ impl SourceBuffer {
             track_ids: DomRefCell::new(vec![]),
             removing: Cell::new(false),
             update_reported: Cell::new(false),
-            backend_update_started: Cell::new(false),
+            operation: Cell::new(None),
             handle: DomRefCell::new(None),
         }
     }
@@ -217,11 +215,11 @@ impl SourceBuffer {
 
     /// Starts an append or remove: `updating` goes true and updatestart is
     /// queued. The backend reports the outcome.
-    fn start_update(&self, removing: bool) {
+    fn start_update(&self, removing: bool, operation: OperationId) {
         self.updating.set(true);
         self.removing.set(removing);
         self.update_reported.set(false);
-        self.backend_update_started.set(false);
+        self.operation.set(Some(operation));
         self.queue_event("updatestart");
     }
 
@@ -259,26 +257,21 @@ impl SourceBuffer {
         }
     }
 
-    fn handle_backend_event(&self, cx: &mut JSContext, event: SourceBufferEvent) {
+    fn handle_backend_event(&self, cx: &mut JSContext, report: SourceBufferReport) {
+        let SourceBufferReport { operation, event } = report;
         debug!(
-            "SourceBuffer({}): backend {event:?}, buffered {:?}",
+            "SourceBuffer({}): backend {event:?} for operation {operation}, buffered {:?}",
             self.content_type(),
             self.buffered_ranges()
         );
-        // Outcomes of an operation the DOM already finished (an abort from
-        // script, an error already reported) are not reported twice.
-        if self.removed.get() || !self.updating.get() {
-            return;
-        }
-        if event == SourceBufferEvent::UpdateStart {
-            // updatestart is queued when the operation starts.
-            self.backend_update_started.set(true);
-            return;
-        }
-        if !self.backend_update_started.get() {
+        // Reports of an operation the DOM already finished (an abort from
+        // script, an error already reported), or did not start as an update,
+        // are not this update's outcome.
+        if self.removed.get() || !self.updating.get() || self.operation.get() != Some(operation) {
             return;
         }
         match event {
+            // updatestart is queued when the operation starts.
             SourceBufferEvent::UpdateStart => {},
             SourceBufferEvent::Update => {
                 self.update_reported.set(true);
@@ -507,12 +500,13 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
             self.append_window_start.get(),
             self.append_window_end.get()
         );
-        self.with_handle(|handle| handle.append(bytes))?
+        let operation = self
+            .with_handle(|handle| handle.append(bytes))?
             .map_err(|error| {
                 debug!("SourceBuffer: append refused: {error:?}");
                 media_source_error(error)
             })?;
-        self.start_update(false);
+        self.start_update(false, operation);
         Ok(())
     }
 
@@ -596,9 +590,10 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
         // updating, queues updatestart, removes, and reports update and
         // updateend through the backend.
         let end = if end.is_infinite() { None } else { Some(end) };
-        self.with_handle(|handle| handle.remove(*start, end))?
+        let operation = self
+            .with_handle(|handle| handle.remove(*start, end))?
             .map_err(media_source_error)?;
-        self.start_update(true);
+        self.start_update(true, operation);
         Ok(())
     }
 }

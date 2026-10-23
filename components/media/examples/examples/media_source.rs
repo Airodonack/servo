@@ -23,7 +23,7 @@ use std::{env, fs, process};
 use servo_base::generic_channel::GenericCallback;
 use servo_media::player::context::{GlApi, GlContext, NativeDisplay, PlayerGLContext};
 use servo_media::player::media_source::{
-    EndOfStreamError, MediaSourceEvent, MediaSourceReadyState, SourceBufferEvent,
+    EndOfStreamError, MediaSourceEvent, MediaSourceReadyState, SourceBufferEvent, SourceBufferReport,
 };
 use servo_media::player::video::{VideoFrame, VideoFrameRenderer};
 use servo_media::player::{PlaybackState, PlayerEvent, StreamType};
@@ -152,7 +152,7 @@ fn main() {
     assert_eq!(source.ready_state(), MediaSourceReadyState::Open);
 
     let (buffer_sender, buffer_events) = channel();
-    let buffer_callback = GenericCallback::new(move |event: Result<SourceBufferEvent, _>| {
+    let buffer_callback = GenericCallback::new(move |event: Result<SourceBufferReport, _>| {
         if let Ok(event) = event {
             let _ = buffer_sender.send(event);
         }
@@ -169,18 +169,14 @@ fn main() {
             process::exit(2);
         });
         println!("Appending {path} ({} bytes)", data.len());
-        buffer.append(data).expect("Append refused");
+        let operation = buffer.append(data).expect("Append refused");
         wait_for(
             &buffer_events,
             "updateend",
             Duration::from_secs(10),
-            |event| *event == SourceBufferEvent::UpdateEnd,
+            |report| report.operation == operation && report.event == SourceBufferEvent::UpdateEnd,
         );
-        // mselib delivers the parsed samples to its track buffers shortly
-        // after signalling update-end, so the ranges are read twice.
         println!("  buffered at updateend: {:?}", buffer.buffered());
-        std::thread::sleep(Duration::from_millis(300));
-        println!("  buffered 300 ms later: {:?}", buffer.buffered());
     }
     println!("End of stream");
     source
