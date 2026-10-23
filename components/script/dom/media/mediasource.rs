@@ -792,7 +792,7 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
     }
 
     /// <https://w3c.github.io/media-source/#dom-mediasource-endofstream>
-    fn EndOfStream(&self, _cx: &mut JSContext, error: Option<EndOfStreamError>) -> ErrorResult {
+    fn EndOfStream(&self, cx: &mut JSContext, error: Option<EndOfStreamError>) -> ErrorResult {
         debug!("MediaSource: endOfStream({error:?})");
         // Step 1. If the readyState attribute is not in the "open" state then
         // throw an InvalidStateError exception.
@@ -816,16 +816,35 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
                 .end_of_stream(backend_error)
                 .map_err(media_source_error)?;
         }
-        // End of stream algorithm, steps 1-3: change the readyState attribute
-        // value to "ended", queue a task to fire an event named sourceended,
-        // and let the duration change algorithm run with the highest end
-        // time reported by the buffered attribute.
+        // End of stream algorithm, steps 1-2: change the readyState attribute
+        // value to "ended" and queue a task to fire an event named
+        // sourceended.
         self.ready_state.set(ReadyState::Ended);
-        if error.is_none() {
-            let highest_end = self.buffered().last().map_or(0.0, |last| last.1);
-            self.set_duration_internal(highest_end);
-        }
         self.queue_event("sourceended");
+        match error {
+            // Step 3, error not set: run the duration change algorithm with
+            // the largest track buffer ranges end time across all
+            // SourceBuffer objects in sourceBuffers.
+            None => {
+                let largest_end_time = self
+                    .source_buffers
+                    .buffers()
+                    .iter()
+                    .flat_map(|buffer| buffer.buffered_ranges())
+                    .map(|(_, end)| end)
+                    .fold(0.0, f64::max);
+                if let Err(error) = self.change_duration(largest_end_time) {
+                    warn!("Could not set the duration at the end of stream: {error:?}");
+                }
+            },
+            // Error set to "network" or "decode": the media element's network
+            // or decode error steps.
+            Some(error) => {
+                if let Some(element) = self.media_element.get() {
+                    element.media_source_ended_with_error(cx, error == EndOfStreamError::Network);
+                }
+            },
+        }
         Ok(())
     }
 
