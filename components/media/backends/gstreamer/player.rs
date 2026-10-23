@@ -20,6 +20,7 @@ use servo_base::generic_channel::{self, GenericCallback, GenericReceiver};
 use servo_media::MediaInstanceError;
 use servo_media_player::audio::AudioRenderer;
 use servo_media_player::context::PlayerGLContext;
+use servo_media_player::media_source::{MediaSourceEvent, MediaSourceHandle};
 use servo_media_player::metadata::Metadata;
 use servo_media_player::video::VideoFrameRenderer;
 use servo_media_player::{
@@ -646,6 +647,7 @@ impl GStreamerPlayer {
                 })?;
                 "servosrc://".to_value()
             },
+            StreamType::MediaSource => return Err(PlayerError::MediaSourceNotSupported),
         };
         player.set_property("uri", &uri);
 
@@ -931,6 +933,8 @@ impl GStreamerPlayer {
                         });
                         PlayerSource::Stream(media_stream_src)
                     },
+                    // setup() refuses these players before setting a URI.
+                    StreamType::MediaSource => unreachable!(),
                 };
 
                 inner.set_src(source);
@@ -1023,6 +1027,13 @@ impl Player for GStreamerPlayer {
     inner_player_proxy!(set_stream, stream, &MediaStreamId, only_stream, bool);
     inner_player_proxy!(set_audio_track, stream_index, i32, enabled, bool);
     inner_player_proxy!(set_video_track, stream_index, i32, enabled, bool);
+
+    fn attach_media_source(
+        &self,
+        _: GenericCallback<MediaSourceEvent>,
+    ) -> Result<Box<dyn MediaSourceHandle>, PlayerError> {
+        Err(PlayerError::MediaSourceNotSupported)
+    }
 
     fn set_download_buffering_enabled(&self, enable: bool) -> Result<(), PlayerError> {
         // We can't use the default implementation because we need to set the

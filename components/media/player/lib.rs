@@ -10,11 +10,12 @@ extern crate servo_media_traits;
 
 pub mod audio;
 pub mod context;
+pub mod media_source;
 pub mod metadata;
 pub mod video;
 
 use serde::{Deserialize, Serialize};
-use servo_base::generic_channel::{self, GenericSender};
+use servo_base::generic_channel::{self, GenericCallback, GenericSender};
 use servo_media_traits::MediaInstance;
 use streams::registry::MediaStreamId;
 
@@ -45,6 +46,9 @@ pub enum PlayerError {
     SetStreamFailed,
     // Setting an audio or video track failed.
     SetTrackFailed,
+    /// The player was not created with `StreamType::MediaSource`, or the
+    /// backend has no Media Source Extensions support.
+    MediaSourceNotSupported,
 }
 
 pub type SeekLockMsg = (bool, GenericSender<()>);
@@ -94,6 +98,9 @@ pub enum StreamType {
     Stream,
     /// The stream is seekable.
     Seekable,
+    /// The data comes from a `MediaSource` attached with
+    /// `Player::attach_media_source`; nothing is pushed with `push_data`.
+    MediaSource,
 }
 
 pub trait Player: Send + MediaInstance {
@@ -131,4 +138,12 @@ pub trait Player: Send + MediaInstance {
     fn render_use_gl(&self) -> bool;
     fn set_audio_track(&self, stream_index: i32, enabled: bool) -> Result<(), PlayerError>;
     fn set_video_track(&self, stream_index: i32, enabled: bool) -> Result<(), PlayerError>;
+    /// Attach a Media Source Extensions media source to the player. Its
+    /// events go to `callback`. Requires `StreamType::MediaSource`.
+    ///
+    /// <https://w3c.github.io/media-source/#mediasource-attach>
+    fn attach_media_source(
+        &self,
+        callback: GenericCallback<media_source::MediaSourceEvent>,
+    ) -> Result<Box<dyn media_source::MediaSourceHandle>, PlayerError>;
 }
