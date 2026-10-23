@@ -547,6 +547,12 @@ impl GStreamerPlayer {
         // Set player position interval update to 0.5 seconds.
         let mut config = player.config();
         config.set_position_update_interval(500u32);
+        // Seek to the exact time asked for. Without this, demuxers that can only seek
+        // to a sync point (hlsdemux2 lands on a segment start) report a position seconds
+        // away from the one the media element requested, and the element, which only
+        // completes a seek whose reported position is within SEEK_POSITION_THRESHOLD
+        // of the request, is left with `seeking` set forever.
+        config.set_seek_accurate(true);
         player
             .set_config(config)
             .map_err(|e| PlayerError::Backend(e.to_string()))?;
