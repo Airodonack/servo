@@ -483,6 +483,9 @@ pub struct GStreamerPlayer {
     /// Whether to enable download buffering. This is only enabled heuristically for some media,
     /// because it causes issues in certain situations. See <https://github.com/servo/servo/issues/23241>.
     download_buffering_enabled: AtomicBool,
+    /// Set once an adaptive streaming demuxer joins the pipeline: it fetches playlists and
+    /// segments with its own HTTP client, outside Servo's fetch.
+    fetches_resource_parts: Arc<AtomicBool>,
 }
 
 impl GStreamerPlayer {
@@ -515,6 +518,7 @@ impl GStreamerPlayer {
             stream_type,
             render: Arc::new(Mutex::new(GStreamerRender::new(gl_context))),
             download_buffering_enabled: AtomicBool::new(false),
+            fetches_resource_parts: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -871,6 +875,23 @@ impl GStreamerPlayer {
             let sender_clone = sender.clone();
             let is_ready_clone = self.is_ready.clone();
             let observer = self.observer.clone();
+
+            // hlsdemux2, dashdemux2 and the legacy adaptive demuxers all have "Adaptive" in
+            // their element class.
+            let fetches_resource_parts = self.fetches_resource_parts.clone();
+            if let Some(pipeline) = pipeline.downcast_ref::<gstreamer::Bin>() {
+                pipeline.connect_deep_element_added(move |_, _, element| {
+                    let adaptive = element.factory().is_some_and(|factory| {
+                        factory
+                            .metadata(gstreamer::ELEMENT_METADATA_KLASS)
+                            .is_some_and(|klass| klass.contains("Adaptive"))
+                    });
+                    if adaptive {
+                        fetches_resource_parts.store(true, Ordering::Relaxed);
+                    }
+                });
+            }
+
             pipeline.connect("source-setup", false, move |args| {
                 let source = args[1].get::<gstreamer::Element>().unwrap();
 
@@ -1041,6 +1062,10 @@ impl Player for GStreamerPlayer {
     inner_player_proxy!(set_input_size, size, u64);
     inner_player_proxy!(set_seekable, seekable, bool);
     inner_player_proxy!(set_resource_url, url, &str);
+
+    fn fetches_resource_parts(&self) -> bool {
+        self.fetches_resource_parts.load(Ordering::Relaxed)
+    }
 
     fn attach_media_source(
         &self,
