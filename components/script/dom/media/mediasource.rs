@@ -472,14 +472,43 @@ impl MediaSource {
     /// backend has processed.
     ///
     /// <https://w3c.github.io/media-source/#sourcebuffer-init-segment-received>
-    pub(crate) fn first_initialization_segment_received(&self, buffer: &SourceBuffer) {
+    pub(crate) fn first_initialization_segment_received(
+        &self,
+        cx: &mut JSContext,
+        buffer: &SourceBuffer,
+    ) {
         // Step 1. Update the duration attribute if it currently equals NaN.
         self.refresh_duration();
+        let element = self.media_element.get();
+        // Step 5. For each audio, video and text track in the initialization
+        // segment, create the track on the media element. The backend lists
+        // this buffer's tracks, which the buffer removes again with itself.
+        if let Some(element) = element.as_ref() {
+            let added = element.add_media_source_tracks(cx, &buffer.tracks());
+            buffer.set_track_ids(added);
+        }
         // Step 5.4. If active track flag equals true, add this SourceBuffer
         // to activeSourceBuffers and queue addsourcebuffer at it.
         buffer.set_active(true);
         self.active_source_buffers
             .add_in_order_of(buffer, &self.source_buffers);
+        // Step 8. If each object in sourceBuffers of the parent media source
+        // has [[first initialization segment received flag]] equal to true,
+        // and the HTMLMediaElement's readyState attribute is HAVE_NOTHING,
+        // then set it to HAVE_METADATA. The element takes the video size
+        // from the tracks of all buffers.
+        // Step 7, which drops a readyState above HAVE_CURRENT_DATA back to
+        // HAVE_METADATA when a buffer added during playback gets its first
+        // initialization segment, is not implemented: nothing would raise
+        // the readyState again afterwards.
+        let buffers = self.source_buffers.buffers();
+        let all_received = buffers
+            .iter()
+            .all(|buffer| buffer.first_initialization_segment_received());
+        if all_received && let Some(element) = element {
+            let tracks: Vec<_> = buffers.iter().flat_map(|buffer| buffer.tracks()).collect();
+            element.media_source_metadata_received(cx, &tracks);
+        }
     }
 
     /// Takes the duration the backend derived from the appended data when
@@ -798,6 +827,11 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         // update-abort and updateend events.
         if source_buffer.updating() {
             source_buffer.abort_update();
+        }
+        // Steps 3-5. Remove the audio, video and text tracks the buffer created from the media
+        // element's lists, queueing removetrack (and change for an enabled or selected one).
+        if let Some(element) = self.media_element.get() {
+            element.remove_media_source_tracks(&source_buffer.take_track_ids());
         }
         // Steps 6-9. Remove the buffer from activeSourceBuffers and
         // sourceBuffers, with their events, and destroy its resources. Step 1
