@@ -21,11 +21,11 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::dom::bindings::codegen::Bindings::URLBinding::URLMethods;
+use crate::dom::bindings::codegen::UnionTypes::BlobOrMediaSource;
 use crate::dom::bindings::error::{Error, ErrorResult, Fallible};
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{DomRoot, MutNullableDom};
 use crate::dom::bindings::str::{DOMString, USVString};
-use crate::dom::blob::Blob;
 use crate::dom::globalscope::GlobalScope;
 use crate::dom::url::urlhelper::UrlHelper;
 use crate::dom::url::urlsearchparams::URLSearchParams;
@@ -192,14 +192,25 @@ impl URLMethods<crate::DomTypeHolder> for URL {
     }
 
     /// <https://w3c.github.io/FileAPI/#dfn-createObjectURL>
-    fn CreateObjectURL(global: &GlobalScope, blob: &Blob) -> DOMString {
+    fn CreateObjectURL(global: &GlobalScope, obj: BlobOrMediaSource) -> DOMString {
         // XXX: Second field is an unicode-serialized Origin, it is a temporary workaround
         //      and should not be trusted. See issue https://github.com/servo/servo/issues/11722
         let origin = global.origin();
 
-        let id = blob.get_blob_url_id();
-
-        DOMString::from(URL::unicode_serialization_blob_url(origin.immutable(), &id))
+        match obj {
+            BlobOrMediaSource::Blob(blob) => {
+                let id = blob.get_blob_url_id();
+                DOMString::from(URL::unicode_serialization_blob_url(origin.immutable(), &id))
+            },
+            // <https://w3c.github.io/media-source/#dom-url-createobjecturl>
+            // A MediaSource object URL is only resolvable by media elements of this
+            // global, so it is kept here rather than in the blob URL store.
+            BlobOrMediaSource::MediaSource(media_source) => {
+                let url = URL::unicode_serialization_blob_url(origin.immutable(), &Uuid::new_v4());
+                global.register_media_source_url(url.clone(), &media_source);
+                DOMString::from(url)
+            },
+        }
     }
 
     /// <https://w3c.github.io/FileAPI/#dfn-revokeObjectURL>
@@ -208,6 +219,10 @@ impl URLMethods<crate::DomTypeHolder> for URL {
         // if the value provided for the url argument does not have an entry in the Blob URL Store,
         // this method call does nothing. User agents may display a message on the error console.
         let origin = global.origin().immutable().clone();
+
+        if global.revoke_media_source_url(&url.str()) {
+            return;
+        }
 
         if let Ok(url) = ServoUrl::parse(&url.str()) &&
             url.fragment().is_none() &&

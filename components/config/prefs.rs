@@ -171,6 +171,8 @@ pub struct Preferences {
     pub dom_indexeddb_enabled: bool,
     // feature: IntersectionObserver | #35767 | Web/API/Intersection_Observer_API
     pub dom_intersection_observer_enabled: bool,
+    // feature: Media Source Extensions | #22416 | Web/API/Media_Source_Extensions_API
+    pub dom_media_source_enabled: bool,
     pub dom_microdata_testing_enabled: bool,
     // feature: Navigator.registerProtocolHandler() | #40615 | Web/API/Navigator/registerProtocolHandler
     pub dom_navigator_protocol_handlers_enabled: bool,
@@ -447,6 +449,7 @@ impl Preferences {
             dom_wakelock_enabled: false,
             dom_indexeddb_enabled: false,
             dom_intersection_observer_enabled: false,
+            dom_media_source_enabled: false,
             dom_microdata_testing_enabled: false,
             dom_navigator_protocol_handlers_enabled: false,
             dom_notification_enabled: false,
