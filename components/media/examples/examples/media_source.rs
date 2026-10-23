@@ -23,7 +23,8 @@ use std::{env, fs, process};
 use servo_base::generic_channel::GenericCallback;
 use servo_media::player::context::{GlApi, GlContext, NativeDisplay, PlayerGLContext};
 use servo_media::player::media_source::{
-    EndOfStreamError, MediaSourceEvent, MediaSourceReadyState, SourceBufferEvent, SourceBufferReport,
+    EndOfStreamError, MediaSourceEvent, MediaSourceReadyState, SourceBufferEvent,
+    SourceBufferReport,
 };
 use servo_media::player::video::{VideoFrame, VideoFrameRenderer};
 use servo_media::player::{PlaybackState, PlayerEvent, StreamType};

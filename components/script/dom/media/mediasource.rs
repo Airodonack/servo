@@ -425,7 +425,9 @@ impl MediaSource {
         let new_duration = new_duration.max(highest_end_time);
         // Step 5. Update duration to new duration.
         if let Some(handle) = self.handle.borrow().as_ref() {
-            handle.set_duration(new_duration).map_err(media_source_error)?;
+            handle
+                .set_duration(new_duration)
+                .map_err(media_source_error)?;
         }
         // Step 6. Update the media element's duration and run its duration
         // change algorithm.

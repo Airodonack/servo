@@ -3230,7 +3230,6 @@ impl HTMLMediaElement {
         video_size: Option<(u32, u32)>,
         title: Option<String>,
     ) {
-
         // TODO Step 1. Establish the media timeline for the purposes of the current playback
         // position and the earliest possible position, based on the media data.
 
