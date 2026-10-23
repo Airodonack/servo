@@ -545,6 +545,10 @@ pub(crate) struct HTMLMediaElement {
     ///
     /// Reset to false every time the load algorithm is invoked.
     fired_loadeddata_event: Cell<bool>,
+    /// Whether the end of playback steps have run since the current playback position last
+    /// reached the end of the media resource. The backend's end of stream and, with a
+    /// MediaSource, reaching its duration both report the end; the steps must run once.
+    end_of_playback_reached: Cell<bool>,
     /// <https://html.spec.whatwg.org/multipage/#dom-media-error>
     error: MutNullableDom<MediaError>,
     /// The MediaSource attached to this element, while one is.
@@ -704,6 +708,7 @@ impl HTMLMediaElement {
             current_src: Default::default(),
             generation_id: Cell::new(0),
             fired_loadeddata_event: Cell::new(false),
+            end_of_playback_reached: Cell::new(false),
             error: Default::default(),
             media_source: Default::default(),
             paused: Cell::new(true),
@@ -2123,6 +2128,7 @@ impl HTMLMediaElement {
         // Reset the flag that signals whether loadeddata was ever fired for
         // this invokation of the load algorithm.
         self.fired_loadeddata_event.set(false);
+        self.end_of_playback_reached.set(false);
 
         // TODO Step 1. Set this element's is currently stalled to false.
 
@@ -2405,6 +2411,8 @@ impl HTMLMediaElement {
 
     /// <https://html.spec.whatwg.org/multipage/#dom-media-seek>
     fn seek(&self, time: f64, _approximate_for_speed: bool) {
+        self.end_of_playback_reached.set(false);
+
         // Step 1. Set the media element's show poster flag to false.
         self.show_poster.set(false);
 
@@ -2830,6 +2838,9 @@ impl HTMLMediaElement {
     fn playback_end(&self, cx: &mut JSContext) {
         // Abort the following steps of the end of playback if seeking is in progress.
         if self.seeking.get() {
+            return;
+        }
+        if self.end_of_playback_reached.replace(true) {
             return;
         }
 
@@ -3444,6 +3455,9 @@ impl HTMLMediaElement {
         let reached_media_source_end = position == duration &&
             self.media_source.get().is_some() &&
             self.current_playback_position.get() < duration;
+        if position < duration {
+            self.end_of_playback_reached.set(false);
+        }
 
         let _ = self
             .played
