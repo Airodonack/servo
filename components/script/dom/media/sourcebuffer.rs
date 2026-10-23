@@ -59,9 +59,6 @@ pub(crate) struct SourceBuffer {
     track_ids: DomRefCell<Vec<String>>,
     /// Whether the update in progress is a remove, which abort() must refuse.
     removing: Cell<bool>,
-    /// Whether the backend reported success (update) for the update in
-    /// progress; updateend implies it on success.
-    update_reported: Cell<bool>,
     /// The backend's number for the append or remove in progress. Reports of any
     /// other operation are not this update's outcome.
     operation: Cell<Option<OperationId>>,
@@ -89,7 +86,6 @@ impl SourceBuffer {
             first_initialization_segment_received: Cell::new(false),
             track_ids: DomRefCell::new(vec![]),
             removing: Cell::new(false),
-            update_reported: Cell::new(false),
             operation: Cell::new(None),
             handle: DomRefCell::new(None),
             callback_target: RefCell::new(None),
@@ -219,7 +215,6 @@ impl SourceBuffer {
     fn start_update(&self, removing: bool, operation: OperationId) {
         self.updating.set(true);
         self.removing.set(removing);
-        self.update_reported.set(false);
         self.operation.set(Some(operation));
         self.queue_event("updatestart");
     }
@@ -275,18 +270,18 @@ impl SourceBuffer {
         match event {
             // updatestart is queued when the operation starts.
             SourceBufferEvent::UpdateStart => {},
-            SourceBufferEvent::Update => {
-                self.update_reported.set(true);
-                self.initialization_segment_received(cx);
-                self.queue_event("update");
-            },
-            SourceBufferEvent::UpdateEnd => {
+            // The append or remove succeeded. Buffer append, steps 5-7, and
+            // range removal, steps 7-9: set updating to false, queue update,
+            // queue updateend. The three go together: an update listener
+            // may start the next append at once, so updating is already
+            // false when update fires. The backend reports updateend after
+            // update as a separate event; by then the operation is over and
+            // the guard above drops it. An updateend with no update before
+            // it is taken as the success it implies.
+            SourceBufferEvent::Update | SourceBufferEvent::UpdateEnd => {
                 self.updating.set(false);
                 self.initialization_segment_received(cx);
-                // updateend after a success is preceded by update.
-                if !self.update_reported.get() {
-                    self.queue_event("update");
-                }
+                self.queue_event("update");
                 self.queue_event("updateend");
             },
             // Append error algorithm: updating goes false, error and

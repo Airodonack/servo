@@ -80,9 +80,11 @@ pub enum MediaSourceEvent {
 pub enum SourceBufferEvent {
     /// `updating` went true: an append or remove has started.
     UpdateStart,
-    /// The append or remove succeeded.
+    /// The append or remove succeeded: `updating` went false.
     Update,
-    /// `updating` went false, after `Update`, `Error` or `Abort`.
+    /// `updating` went false, after `Update`, `Error` or `Abort`. The DOM
+    /// already finished the operation on those, so this only means
+    /// something on its own.
     UpdateEnd,
     /// The append failed. The media source has gone to the ended state with
     /// a decode error.
