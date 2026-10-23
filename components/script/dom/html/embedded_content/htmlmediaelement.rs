@@ -40,6 +40,7 @@ use servo_base::generic_channel::{self, GenericCallback, GenericSharedMemory};
 use servo_base::id::WebViewId;
 use servo_config::pref;
 use servo_media::player::audio::AudioRenderer;
+use servo_media::player::media_source::{MediaSourceTrack, MediaSourceTrackKind};
 use servo_media::player::video::{VideoFrame, VideoFrameRenderer};
 use servo_media::player::{PlaybackState, Player, PlayerError, PlayerEvent, SeekLock, StreamType};
 use servo_media::{ClientContextId, ServoMedia, SupportsMediaType};
@@ -686,6 +687,17 @@ enum PlaybackPositionWasMoved {
     #[default]
     ExplicitMove,
     NormalPlayback,
+}
+
+/// Where a new AudioTrack or VideoTrack comes from. A track of a MediaSource's initialization
+/// segment is enabled or selected before it is added, and addtrack is queued ("This should
+/// trigger AudioTrackList logic to queue a task to fire an event named addtrack"), so that page
+/// code cannot run in the middle of the algorithm.
+/// <https://w3c.github.io/media-source/#sourcebuffer-init-segment-received>
+#[derive(Clone, Copy, PartialEq)]
+enum TrackOrigin {
+    MediaResource,
+    MediaSource,
 }
 
 impl HTMLMediaElement {
@@ -2876,6 +2888,13 @@ impl HTMLMediaElement {
             return;
         }
 
+        // With a MediaSource attached, the initialization segments give the tracks and the
+        // metadata instead.
+        // <https://w3c.github.io/media-source/#sourcebuffer-init-segment-received>
+        if self.media_source.get().is_some() {
+            return;
+        }
+
         // https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list
         // => "If the media resource is found to have an audio track"
         for (i, _track) in metadata.audio_tracks.iter().enumerate() {
@@ -2883,7 +2902,7 @@ impl HTMLMediaElement {
                 0 => DOMString::from_static("main"),
                 _ => DOMString::new(),
             };
-            self.add_audio_track(cx, kind);
+            self.add_audio_track(cx, DOMString::new(), kind, TrackOrigin::MediaResource);
         }
 
         // => "If the media resource is found to have a video track"
@@ -2892,36 +2911,37 @@ impl HTMLMediaElement {
                 0 => DOMString::from_static("main"),
                 _ => DOMString::new(),
             };
-            self.add_video_track(cx, kind);
+            self.add_video_track(cx, DOMString::new(), kind, TrackOrigin::MediaResource);
         }
 
         // => "Once enough of the media data has been fetched to determine the duration..."
-        // With a MediaSource attached, the duration is the MediaSource's.
-        // <https://w3c.github.io/media-source/#htmlmediaelement-extensions-duration>
-        let duration = match self.media_source.get() {
-            Some(media_source) => media_source.duration(),
-            None => metadata
-                .duration
-                .map_or(f64::INFINITY, |duration| duration.as_secs_f64()),
-        };
+        let duration = metadata
+            .duration
+            .map_or(f64::INFINITY, |duration| duration.as_secs_f64());
         self.media_metadata_established(
             cx,
             duration,
-            (metadata.width, metadata.height),
+            Some((metadata.width, metadata.height)),
             metadata.title.clone(),
         );
     }
 
     /// <https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list>
     /// => "If the media resource is found to have an audio track"
-    fn add_audio_track(&self, cx: &mut JSContext, kind: DOMString) {
+    fn add_audio_track(
+        &self,
+        cx: &mut JSContext,
+        id: DOMString,
+        kind: DOMString,
+        origin: TrackOrigin,
+    ) {
         let audio_track_list = self.AudioTracks(cx);
 
         // Step 1. Create an AudioTrack object to represent the audio track.
         let audio_track = AudioTrack::new(
             cx,
             self.global().as_window(),
-            DOMString::new(),
+            id,
             kind,
             DOMString::new(),
             DOMString::new(),
@@ -2956,11 +2976,43 @@ impl HTMLMediaElement {
         // Step 6. If enable is true, then enable this audio track, otherwise, do not enable
         // this audio track.
         if audio_track_list.enabled_index().is_none() {
-            audio_track_list.set_enabled(audio_track_list.len() - 1, true);
+            if origin == TrackOrigin::MediaSource {
+                // MSE sets enabled on the new track before announcing it, so no change event,
+                // and the backend plays the initialization segment's tracks already.
+                // <https://w3c.github.io/media-source/#sourcebuffer-init-segment-received>
+                audio_track.set_enabled(true);
+            } else {
+                audio_track_list.set_enabled(audio_track_list.len() - 1, true);
+            }
         }
 
         // Step 7. Fire an event named addtrack at this AudioTrackList object, using TrackEvent,
         // with the track attribute initialized to the new AudioTrack object.
+        if origin == TrackOrigin::MediaSource {
+            let this = Trusted::new(self);
+            let generation_id = self.generation_id.get();
+            let list = Trusted::new(&*audio_track_list);
+            let track = Trusted::new(&*audio_track);
+            self.owner_global()
+                .task_manager()
+                .media_element_task_source()
+                .queue(task!(audio_addtrack: move |cx| {
+                    if generation_id != this.root().generation_id.get() {
+                        return;
+                    }
+                    let list = list.root();
+                    let event = TrackEvent::new(
+                        cx,
+                        list.global().as_window(),
+                        atom!("addtrack"),
+                        false,
+                        false,
+                        &Some(VideoTrackOrAudioTrackOrTextTrack::AudioTrack(track.root())),
+                    );
+                    event.upcast::<Event>().fire(cx, list.upcast::<EventTarget>());
+                }));
+            return;
+        }
         let event = TrackEvent::new(
             cx,
             self.global().as_window(),
@@ -2977,14 +3029,20 @@ impl HTMLMediaElement {
 
     /// <https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list>
     /// => "If the media resource is found to have a video track"
-    fn add_video_track(&self, cx: &mut JSContext, kind: DOMString) {
+    fn add_video_track(
+        &self,
+        cx: &mut JSContext,
+        id: DOMString,
+        kind: DOMString,
+        origin: TrackOrigin,
+    ) {
         let video_track_list = self.VideoTracks(cx);
 
         // Step 1. Create a VideoTrack object to represent the video track.
         let video_track = VideoTrack::new(
             cx,
             self.global().as_window(),
-            DOMString::new(),
+            id,
             kind,
             DOMString::new(),
             DOMString::new(),
@@ -3020,11 +3078,41 @@ impl HTMLMediaElement {
         // selected video tracks, otherwise, do not select this video track. If other tracks are
         // unselected, then a change event will be fired.
         if video_track_list.selected_index().is_none() {
-            video_track_list.set_selected(video_track_list.len() - 1, true);
+            if origin == TrackOrigin::MediaSource {
+                // As for audio: selected is set before the track is announced.
+                video_track.set_selected(true);
+            } else {
+                video_track_list.set_selected(video_track_list.len() - 1, true);
+            }
         }
 
         // Step 7. Fire an event named addtrack at this VideoTrackList object, using TrackEvent,
         // with the track attribute initialized to the new VideoTrack object.
+        if origin == TrackOrigin::MediaSource {
+            let this = Trusted::new(self);
+            let generation_id = self.generation_id.get();
+            let list = Trusted::new(&*video_track_list);
+            let track = Trusted::new(&*video_track);
+            self.owner_global()
+                .task_manager()
+                .media_element_task_source()
+                .queue(task!(video_addtrack: move |cx| {
+                    if generation_id != this.root().generation_id.get() {
+                        return;
+                    }
+                    let list = list.root();
+                    let event = TrackEvent::new(
+                        cx,
+                        list.global().as_window(),
+                        atom!("addtrack"),
+                        false,
+                        false,
+                        &Some(VideoTrackOrAudioTrackOrTextTrack::VideoTrack(track.root())),
+                    );
+                    event.upcast::<Event>().fire(cx, list.upcast::<EventTarget>());
+                }));
+            return;
+        }
         let event = TrackEvent::new(
             cx,
             self.global().as_window(),
@@ -3039,6 +3127,92 @@ impl HTMLMediaElement {
             .fire(cx, video_track_list.upcast::<EventTarget>());
     }
 
+    /// The tracks of a MediaSource's initialization segments that the element does not have
+    /// yet: each gets an AudioTrack or VideoTrack, as if found in the media resource. addtrack
+    /// is queued, so page code runs only once the rest of the algorithm has finished.
+    ///
+    /// <https://w3c.github.io/media-source/#sourcebuffer-init-segment-received> (step 5)
+    /// Returns the ids of the tracks it added.
+    pub(crate) fn add_media_source_tracks(
+        &self,
+        cx: &mut JSContext,
+        tracks: &[MediaSourceTrack],
+    ) -> Vec<String> {
+        let mut added = vec![];
+        for track in tracks {
+            let id = DOMString::from(track.id.as_str());
+            // Step 5.2.5. Let audio kinds be the kinds in the initialization segment, or a single
+            // empty string if no kind information is provided. mselib gives none.
+            let kind = DOMString::new();
+            match track.kind {
+                MediaSourceTrackKind::Audio => {
+                    let list = self.AudioTracks(cx);
+                    let known = (0..list.len())
+                        .filter_map(|index| list.item(index))
+                        .any(|existing| existing.id() == id);
+                    if !known {
+                        self.add_audio_track(cx, id, kind, TrackOrigin::MediaSource);
+                        added.push(track.id.clone());
+                    }
+                },
+                MediaSourceTrackKind::Video => {
+                    let list = self.VideoTracks(cx);
+                    let known = (0..list.len())
+                        .filter_map(|index| list.item(index))
+                        .any(|existing| existing.id() == id);
+                    if !known {
+                        self.add_video_track(cx, id, kind, TrackOrigin::MediaSource);
+                        added.push(track.id.clone());
+                    }
+                },
+                // Text tracks of initialization segments are not exposed yet.
+                MediaSourceTrackKind::Text => {},
+            }
+        }
+        added
+    }
+
+    /// Removes the tracks with these ids, which a removed SourceBuffer created.
+    ///
+    /// <https://w3c.github.io/media-source/#dom-mediasource-removesourcebuffer> (steps 3-5)
+    pub(crate) fn remove_media_source_tracks(&self, ids: &[String]) {
+        for id in ids {
+            let id = DOMString::from(id.as_str());
+            if let Some(list) = self.audio_tracks_list.get() &&
+                let Some(track) = (0..list.len())
+                    .filter_map(|index| list.item(index))
+                    .find(|track| track.id() == id)
+            {
+                list.remove(&track);
+            }
+            if let Some(list) = self.video_tracks_list.get() &&
+                let Some(track) = (0..list.len())
+                    .filter_map(|index| list.item(index))
+                    .find(|track| track.id() == id)
+            {
+                list.remove(&track);
+            }
+        }
+    }
+
+    /// Every source buffer of the attached MediaSource has received its first initialization
+    /// segment: the element has its metadata.
+    ///
+    /// <https://w3c.github.io/media-source/#sourcebuffer-init-segment-received> (step 8)
+    pub(crate) fn media_source_metadata_received(&self, cx: &mut JSContext) {
+        // > If the HTMLMediaElement's readyState attribute is HAVE_NOTHING, then set the
+        // > HTMLMediaElement's readyState attribute to HAVE_METADATA.
+        if self.ready_state.get() != ReadyState::HaveNothing {
+            return;
+        }
+        let Some(media_source) = self.media_source.get() else {
+            return;
+        };
+        // The backend does not report the video size of an initialization segment; the first
+        // frame gives it.
+        self.media_metadata_established(cx, media_source.duration(), None, None);
+    }
+
     /// <https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list>
     /// => "Once enough of the media data has been fetched to determine the duration of the media
     /// resource, its dimensions, and other metadata"
@@ -3046,7 +3220,7 @@ impl HTMLMediaElement {
         &self,
         cx: &mut JSContext,
         duration: f64,
-        video_size: (u32, u32),
+        video_size: Option<(u32, u32)>,
         title: Option<String>,
     ) {
         // TODO Step 1. Establish the media timeline for the purposes of the current playback
@@ -3070,14 +3244,21 @@ impl HTMLMediaElement {
         // in principle infinite), update the duration attribute to the value positive Infinity.
         // Note: The user agent will queue a media element task given the media element to fire an
         // event named durationchange at the element at this point.
-        self.duration.set(duration);
-        self.queue_media_element_task_to_fire_event(atom!("durationchange"));
+        // With a MediaSource attached, the duration is the MediaSource's, and its duration change
+        // algorithm has already updated it and fired durationchange.
+        // <https://w3c.github.io/media-source/#htmlmediaelement-extensions-duration>
+        if self.duration.get().to_bits() != duration.to_bits() {
+            self.duration.set(duration);
+            self.queue_media_element_task_to_fire_event(atom!("durationchange"));
+        }
 
         // Step 5. For video elements, set the videoWidth and videoHeight attributes, and queue a
         // media element task given the media element to fire an event named resize at the media
         // element.
-        if let Some(video_element) = self.downcast::<HTMLVideoElement>() {
-            let (width, height) = video_size;
+        // An initialization segment may not give the size; the first frame then does.
+        if let Some(video_element) = self.downcast::<HTMLVideoElement>() &&
+            let Some((width, height)) = video_size
+        {
             video_element.set_natural_dimensions(cx.no_gc(), Some(width), Some(height));
             self.queue_media_element_task_to_fire_event(atom!("resize"));
         }

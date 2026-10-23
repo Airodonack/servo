@@ -3,6 +3,7 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, Weak};
@@ -231,6 +232,10 @@ pub(crate) struct MediaSource {
     #[ignore_malloc_size_of = "Arc"]
     #[no_trace]
     callback_target: RefCell<Option<Arc<Mutex<BackendCallbackTarget<MediaSource>>>>>,
+    /// The ids of every track announced to the media element, so that a track
+    /// of a removed SourceBuffer, which the backend still lists, is not
+    /// announced again for the next one.
+    announced_track_ids: DomRefCell<HashSet<String>>,
 }
 
 impl MediaSource {
@@ -247,6 +252,7 @@ impl MediaSource {
             media_element: Default::default(),
             handle: DomRefCell::new(None),
             callback_target: RefCell::new(None),
+            announced_track_ids: Default::default(),
         }
     }
 
@@ -360,6 +366,7 @@ impl MediaSource {
         // Dropping the handle detaches the backend side.
         *self.handle.borrow_mut() = None;
         *self.callback_target.borrow_mut() = None;
+        self.announced_track_ids.borrow_mut().clear();
         self.media_element.set(None);
         // Step 7. Queue a task to fire an event named sourceclose at the MediaSource.
         self.queue_event("sourceclose");
@@ -466,14 +473,60 @@ impl MediaSource {
     /// backend has processed.
     ///
     /// <https://w3c.github.io/media-source/#sourcebuffer-init-segment-received>
-    pub(crate) fn first_initialization_segment_received(&self, buffer: &SourceBuffer) {
+    pub(crate) fn first_initialization_segment_received(
+        &self,
+        cx: &mut JSContext,
+        buffer: &SourceBuffer,
+    ) {
         // Step 1. Update the duration attribute if it currently equals NaN.
         self.refresh_duration();
+        let element = self.media_element.get();
+        // Step 5. For each audio, video and text track in the initialization
+        // segment, create the track on the media element. The backend lists
+        // the tracks of all buffers; those the element already has came from
+        // another buffer's initialization segment.
+        let tracks = self
+            .handle
+            .borrow()
+            .as_ref()
+            .map(|handle| handle.tracks())
+            .unwrap_or_default();
+        let new_tracks: Vec<_> = {
+            let announced = self.announced_track_ids.borrow();
+            tracks
+                .iter()
+                .filter(|track| !announced.contains(&track.id))
+                .cloned()
+                .collect()
+        };
+        if let Some(element) = element.as_ref() {
+            let added = element.add_media_source_tracks(cx, &new_tracks);
+            self.announced_track_ids
+                .borrow_mut()
+                .extend(added.iter().cloned());
+            buffer.set_track_ids(added);
+        }
         // Step 5.4. If active track flag equals true, add this SourceBuffer
         // to activeSourceBuffers and queue addsourcebuffer at it.
         buffer.set_active(true);
         self.active_source_buffers
             .add_in_order_of(buffer, &self.source_buffers);
+        // Step 8. If each object in sourceBuffers of the parent media source
+        // has [[first initialization segment received flag]] equal to true,
+        // and the HTMLMediaElement's readyState attribute is HAVE_NOTHING,
+        // then set it to HAVE_METADATA.
+        // Step 7, which drops a readyState above HAVE_CURRENT_DATA back to
+        // HAVE_METADATA when a buffer added during playback gets its first
+        // initialization segment, is not implemented: nothing would raise
+        // the readyState again afterwards.
+        let all_received = self
+            .source_buffers
+            .buffers()
+            .iter()
+            .all(|buffer| buffer.first_initialization_segment_received());
+        if all_received && let Some(element) = element {
+            element.media_source_metadata_received(cx);
+        }
     }
 
     /// Takes the duration the backend derived from the appended data when
@@ -792,6 +845,11 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         // update-abort and updateend events.
         if source_buffer.updating() {
             source_buffer.abort_update();
+        }
+        // Steps 3-5. Remove the audio, video and text tracks the buffer created from the media
+        // element's lists, queueing removetrack (and change for an enabled or selected one).
+        if let Some(element) = self.media_element.get() {
+            element.remove_media_source_tracks(&source_buffer.take_track_ids());
         }
         // Steps 6-9. Remove the buffer from activeSourceBuffers and
         // sourceBuffers, with their events, and destroy its resources. Step 1
