@@ -9,13 +9,16 @@ use script_bindings::reflector::reflect_dom_object;
 
 use crate::dom::audio::audiotrack::AudioTrack;
 use crate::dom::bindings::codegen::Bindings::AudioTrackListBinding::AudioTrackListMethods;
+use crate::dom::bindings::codegen::UnionTypes::VideoTrackOrAudioTrackOrTextTrack;
 use crate::dom::bindings::inheritance::Castable;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
+use crate::dom::event::Event;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::html::htmlmediaelement::HTMLMediaElement;
+use crate::dom::trackevent::TrackEvent;
 use crate::dom::window::Window;
 
 #[dom_struct]
@@ -102,6 +105,40 @@ impl AudioTrackList {
     pub(crate) fn add(&self, track: &AudioTrack) {
         self.tracks.borrow_mut().push(Dom::from_ref(track));
         track.add_track_list(self);
+    }
+
+    /// Removes `track`, queueing removetrack, and change if it was enabled.
+    ///
+    /// <https://html.spec.whatwg.org/multipage/#dom-media-audiotracks>
+    /// <https://w3c.github.io/media-source/#dom-mediasource-removesourcebuffer> (steps 3-4)
+    pub(crate) fn remove(&self, track: &AudioTrack) {
+        let Some(index) = self.find(track) else {
+            return;
+        };
+        let was_enabled = track.enabled();
+        self.tracks.borrow_mut().remove(index);
+        track.remove_track_list();
+
+        let this = Trusted::new(self);
+        let removed = Trusted::new(track);
+        self.global()
+            .task_manager()
+            .media_element_task_source()
+            .queue(task!(audio_removetrack: move |cx| {
+                let this = this.root();
+                let event = TrackEvent::new(
+                    cx,
+                    this.global().as_window(),
+                    atom!("removetrack"),
+                    false,
+                    false,
+                    &Some(VideoTrackOrAudioTrackOrTextTrack::AudioTrack(removed.root())),
+                );
+                event.upcast::<Event>().fire(cx, this.upcast::<EventTarget>());
+                if was_enabled {
+                    this.upcast::<EventTarget>().fire_event(cx, atom!("change"));
+                }
+            }));
     }
 
     pub(crate) fn clear(&self) {

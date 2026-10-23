@@ -9,7 +9,7 @@
 //! buffered ranges, the `updating` flag and the ready state; these handles
 //! only forward calls and relay signals as events.
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
@@ -20,7 +20,8 @@ use servo_base::generic_channel::GenericCallback;
 use servo_media_player::PlayerError;
 use servo_media_player::media_source::{
     AppendMode, BufferedRanges, EndOfStreamError, MediaSourceError, MediaSourceEvent,
-    MediaSourceHandle, OperationId, SourceBufferEvent, SourceBufferHandle, SourceBufferReport,
+    MediaSourceHandle, MediaSourceTrack, MediaSourceTrackKind, OperationId, SourceBufferEvent,
+    SourceBufferHandle, SourceBufferReport,
 };
 
 use crate::player::{GStreamerPlayer, clock_time};
@@ -72,6 +73,12 @@ macro_rules! notify {
 
 pub struct GStreamerMediaSource {
     source: gst_mse::MediaSource,
+    /// The `msesrc`, which counts the tracks of the initialization segments
+    /// received so far.
+    mse_src: gst_mse::MseSrc,
+    /// The counted tracks the source buffers have claimed, for a mselib
+    /// without per-buffer tracks.
+    claimed_tracks: ClaimedTracks,
 }
 
 impl GStreamerMediaSource {
@@ -94,7 +101,11 @@ impl GStreamerMediaSource {
         let cb = callback;
         source.connect_on_source_close(move |_| notify!(cb, MediaSourceEvent::SourceClose));
         source.attach(&mse_src);
-        Ok(Self { source })
+        Ok(Self {
+            source,
+            mse_src,
+            claimed_tracks: Default::default(),
+        })
     }
 }
 
@@ -127,6 +138,8 @@ impl MediaSourceHandle for GStreamerMediaSource {
             .map_err(map_error)?;
         Ok(Box::new(GStreamerSourceBuffer::new(
             &self.source,
+            &self.mse_src,
+            self.claimed_tracks.clone(),
             buffer,
             callback,
         )))
@@ -161,6 +174,64 @@ impl MediaSourceHandle for GStreamerMediaSource {
     }
 }
 
+/// The ids of the counted tracks that source buffers have taken, shared by
+/// the buffers of one media source.
+type ClaimedTracks = Arc<Mutex<HashSet<String>>>;
+
+/// The tracks of every initialization segment received so far, over all
+/// source buffers, from the msesrc's counts by type, which are updated
+/// before the append that delivered an initialization segment completes.
+/// Tracks are never removed, so the n-th track of a type keeps its id. The
+/// spec has the user agent generate the ids anyway. No caps, so no video
+/// size.
+fn counted_tracks(mse_src: &gst_mse::MseSrc) -> Vec<MediaSourceTrack> {
+    let kinds = [
+        (MediaSourceTrackKind::Audio, "audio", mse_src.n_audio()),
+        (MediaSourceTrackKind::Video, "video", mse_src.n_video()),
+        (MediaSourceTrackKind::Text, "text", mse_src.n_text()),
+    ];
+    kinds
+        .into_iter()
+        .flat_map(|(kind, name, count)| {
+            (0..count).map(move |index| MediaSourceTrack {
+                id: format!("{name}{index}"),
+                kind,
+                video_size: None,
+            })
+        })
+        .collect()
+}
+
+/// One stream of a source buffer's `tracks` collection as a seam track: the
+/// stream id is unique within the media source, and the caps parsed from
+/// the initialization segment give a video track's size.
+fn stream_track(stream: &gstreamer::Stream) -> Option<MediaSourceTrack> {
+    let stream_type = stream.stream_type();
+    let kind = if stream_type.contains(gstreamer::StreamType::VIDEO) {
+        MediaSourceTrackKind::Video
+    } else if stream_type.contains(gstreamer::StreamType::AUDIO) {
+        MediaSourceTrackKind::Audio
+    } else if stream_type.contains(gstreamer::StreamType::TEXT) {
+        MediaSourceTrackKind::Text
+    } else {
+        return None;
+    };
+    let video_size = match kind {
+        MediaSourceTrackKind::Video => stream.caps().and_then(|caps| {
+            let structure = caps.structure(0)?;
+            let width = structure.get::<i32>("width").ok()?;
+            let height = structure.get::<i32>("height").ok()?;
+            Some((u32::try_from(width).ok()?, u32::try_from(height).ok()?))
+        }),
+        _ => None,
+    };
+    Some(MediaSourceTrack {
+        id: stream.stream_id()?.to_string(),
+        kind,
+        video_size,
+    })
+}
+
 /// mselib's source buffer property for the timestamp offset, in nanoseconds.
 const TIMESTAMP_OFFSET: &str = "timestamp-offset";
 
@@ -169,10 +240,20 @@ pub struct GStreamerSourceBuffer {
     /// The media source the buffer belongs to, for its active list and for
     /// removing the buffer from it.
     source: gst_mse::MediaSource,
+    /// The media source's `msesrc`, for a mselib without per-buffer tracks.
+    mse_src: gst_mse::MseSrc,
+    /// Whether mselib lists this buffer's tracks (its `tracks` property).
+    /// Without it the buffer claims the counted tracks no other buffer has
+    /// claimed yet, which credits a track to the wrong buffer when two
+    /// initialization segments are parsed before either append ends.
+    per_buffer_tracks: bool,
     /// Whether mselib takes a negative timestamp offset: its
     /// `timestamp-offset` property's range includes negative values. An
     /// mselib that holds the offset as an unsigned GstClockTime clamps it.
     signed_timestamp_offset: bool,
+    claimed_tracks: ClaimedTracks,
+    /// The counted tracks this buffer claimed.
+    counted_tracks: Mutex<Vec<MediaSourceTrack>>,
     operations: Arc<Mutex<Operations>>,
 }
 
@@ -197,6 +278,8 @@ struct Operations {
 impl GStreamerSourceBuffer {
     fn new(
         source: &gst_mse::MediaSource,
+        mse_src: &gst_mse::MseSrc,
+        claimed_tracks: ClaimedTracks,
         buffer: gst_mse::SourceBuffer,
         callback: GenericCallback<SourceBufferReport>,
     ) -> Self {
@@ -228,6 +311,8 @@ impl GStreamerSourceBuffer {
         buffer.connect_on_update_end(report(SourceBufferEvent::UpdateEnd));
         buffer.connect_on_error(report(SourceBufferEvent::Error));
         buffer.connect_on_abort(report(SourceBufferEvent::Abort));
+        let per_buffer_tracks =
+            buffer.has_property_with_type("tracks", gstreamer::StreamCollection::static_type());
         let signed_timestamp_offset =
             buffer
                 .find_property(TIMESTAMP_OFFSET)
@@ -239,7 +324,11 @@ impl GStreamerSourceBuffer {
         Self {
             buffer,
             source: source.clone(),
+            mse_src: mse_src.clone(),
+            per_buffer_tracks,
             signed_timestamp_offset,
+            claimed_tracks,
+            counted_tracks: Default::default(),
             operations,
         }
     }
@@ -277,6 +366,27 @@ impl SourceBufferHandle for GStreamerSourceBuffer {
         (0..active.length())
             .filter_map(|i| active.index(i))
             .any(|candidate| candidate == self.buffer)
+    }
+
+    fn tracks(&self) -> Vec<MediaSourceTrack> {
+        if self.per_buffer_tracks {
+            let tracks = self
+                .buffer
+                .property::<gstreamer::StreamCollection>("tracks");
+            return tracks
+                .iter()
+                .filter_map(|stream| stream_track(&stream))
+                .collect();
+        }
+        let mut counted = self.counted_tracks.lock().unwrap();
+        if counted.is_empty() {
+            let mut claimed = self.claimed_tracks.lock().unwrap();
+            *counted = counted_tracks(&self.mse_src)
+                .into_iter()
+                .filter(|track| claimed.insert(track.id.clone()))
+                .collect();
+        }
+        counted.clone()
     }
 
     fn buffered(&self) -> BufferedRanges {
