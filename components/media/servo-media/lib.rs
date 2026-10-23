@@ -64,6 +64,12 @@ pub trait Backend: Send + Sync {
     ) -> Result<Arc<Mutex<AudioContext>>, AudioSinkError>;
     fn create_webrtc(&self, signaller: Box<dyn WebRtcSignaller>) -> WebRtcController;
     fn can_play_type(&self, media_type: &str) -> SupportsMediaType;
+    /// Whether a `SourceBuffer` of this content type can be created.
+    ///
+    /// <https://w3c.github.io/media-source/#dom-mediasource-istypesupported>
+    fn is_media_source_type_supported(&self, _media_type: &str) -> bool {
+        false
+    }
     fn set_capture_mocking(&self, _mock: bool) {}
     /// Allow muting/unmuting the media instances associated with the given client context identifier.
     /// Backend implementations are responsible for keeping a match between client contexts
