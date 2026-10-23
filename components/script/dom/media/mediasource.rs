@@ -46,6 +46,11 @@ use crate::tasks::task_source::SendableTaskSource;
 /// source tests assume the same bound for their media.
 const LONGEST_FRAME: f64 = 0.1;
 
+/// How many SourceBuffers a MediaSource may have at once. Each one runs a
+/// parsing pipeline and several threads in the backend. Pages use one per
+/// stream type (audio, video, text).
+const MAX_SOURCE_BUFFERS: usize = 4;
+
 /// What a backend callback holds to reach a DOM object: a weak reference
 /// behind an `Arc` that only the DOM object owns, through
 /// [`BackendCallbackTarget::new`]. The callback keeps a `std::sync::Weak`, so
@@ -709,19 +714,28 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
             return Err(Error::NotSupported(None));
         }
         debug!("MediaSource: addSourceBuffer({type_})");
-        // Step 3. If the readyState attribute is not in the "open" state then
+        // Step 3. If the user agent can't handle any more SourceBuffer objects,
+        // then throw a QuotaExceededError exception.
+        if self.source_buffers.buffers().len() >= MAX_SOURCE_BUFFERS {
+            return Err(Error::QuotaExceeded {
+                quota: None,
+                requested: None,
+            });
+        }
+        // Step 4. If the readyState attribute is not in the "open" state then
         // throw an InvalidStateError exception.
         if self.ready_state.get() != ReadyState::Open {
             return Err(Error::InvalidState(None));
         }
-        // Steps 4-7. Create a new SourceBuffer object and associated resources.
+        // Steps 5-7. Let buffer be a new SourceBuffer with its associated
+        // resources; the backend sets its mode from the byte stream format.
         let buffer = SourceBuffer::new(cx, &self.global(), self, &type_.str())?;
-        // Step 8. Add the new object to sourceBuffers and queue a task to fire
-        // an event named addsourcebuffer at sourceBuffers. It joins
+        // Steps 8-9. Append buffer to sourceBuffers and queue a task to fire an
+        // event named addsourcebuffer at sourceBuffers. It joins
         // activeSourceBuffers once its first initialization segment is
         // processed.
         self.source_buffers.add(&buffer);
-        // Step 9. Return the new object.
+        // Step 10. Return buffer.
         Ok(buffer)
     }
 
