@@ -116,6 +116,21 @@ impl AsRef<[f32]> for GStreamerAudioChunk {
     }
 }
 
+/// Seconds as a GstClockTime. NaN and negative times become zero. Times beyond what a
+/// GstClockTime holds (about 584 years) become the largest one: the nanosecond count would
+/// otherwise saturate to GST_CLOCK_TIME_NONE, which ClockTime::from_nseconds refuses with a
+/// panic, and a page can seek that far into a stream of unknown duration.
+pub(crate) fn clock_time(seconds: f64) -> gstreamer::ClockTime {
+    let nanoseconds = seconds * 1_000_000_000.0;
+    if nanoseconds.is_nan() || nanoseconds <= 0.0 {
+        gstreamer::ClockTime::ZERO
+    } else if nanoseconds >= gstreamer::ClockTime::MAX.nseconds() as f64 {
+        gstreamer::ClockTime::MAX
+    } else {
+        gstreamer::ClockTime::from_nseconds(nanoseconds as u64)
+    }
+}
+
 #[derive(PartialEq)]
 enum PlayerSource {
     Seekable(ServoSrc),
@@ -270,9 +285,7 @@ impl PlayerInner {
             return Err(PlayerError::SeekOutOfRange);
         }
 
-        let time = time * 1_000_000_000.;
-        self.player
-            .seek(gstreamer::ClockTime::from_nseconds(time as u64));
+        self.player.seek(clock_time(time));
         Ok(())
     }
 
