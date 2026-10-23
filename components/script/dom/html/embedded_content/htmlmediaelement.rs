@@ -2879,141 +2879,176 @@ impl HTMLMediaElement {
         // https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list
         // => "If the media resource is found to have an audio track"
         for (i, _track) in metadata.audio_tracks.iter().enumerate() {
-            let audio_track_list = self.AudioTracks(cx);
-
-            // Step 1. Create an AudioTrack object to represent the audio track.
             let kind = match i {
                 0 => DOMString::from_static("main"),
                 _ => DOMString::new(),
             };
-
-            let audio_track = AudioTrack::new(
-                cx,
-                self.global().as_window(),
-                DOMString::new(),
-                kind,
-                DOMString::new(),
-                DOMString::new(),
-                Some(&*audio_track_list),
-            );
-
-            // Steps 2. Update the media element's audioTracks attribute's AudioTrackList object
-            // with the new AudioTrack object.
-            audio_track_list.add(&audio_track);
-
-            // Step 3. Let enable be unknown.
-            // Step 4. If either the media resource or the URL of the current media resource
-            // indicate a particular set of audio tracks to enable, or if the user agent has
-            // information that would facilitate the selection of specific audio tracks to
-            // improve the user's experience, then: if this audio track is one of the ones to
-            // enable, then set enable to true, otherwise, set enable to false.
-            if let Some(servo_url) = self.resource_url.borrow().as_ref() {
-                let fragment = MediaFragmentParser::from(servo_url);
-                if let Some(id) = fragment.id() &&
-                    audio_track.id() == id
-                {
-                    audio_track_list.set_enabled(audio_track_list.len() - 1, true);
-                }
-
-                if fragment.tracks().contains(&audio_track.kind().into()) {
-                    audio_track_list.set_enabled(audio_track_list.len() - 1, true);
-                }
-            }
-
-            // Step 5. If enable is still unknown, then, if the media element does not yet have an
-            // enabled audio track, then set enable to true, otherwise, set enable to false.
-            // Step 6. If enable is true, then enable this audio track, otherwise, do not enable
-            // this audio track.
-            if audio_track_list.enabled_index().is_none() {
-                audio_track_list.set_enabled(audio_track_list.len() - 1, true);
-            }
-
-            // Step 7. Fire an event named addtrack at this AudioTrackList object, using TrackEvent,
-            // with the track attribute initialized to the new AudioTrack object.
-            let event = TrackEvent::new(
-                cx,
-                self.global().as_window(),
-                atom!("addtrack"),
-                false,
-                false,
-                &Some(VideoTrackOrAudioTrackOrTextTrack::AudioTrack(audio_track)),
-            );
-
-            event
-                .upcast::<Event>()
-                .fire(cx, audio_track_list.upcast::<EventTarget>());
+            self.add_audio_track(cx, kind);
         }
 
         // => "If the media resource is found to have a video track"
         for (i, _track) in metadata.video_tracks.iter().enumerate() {
-            let video_track_list = self.VideoTracks(cx);
-
-            // Step 1. Create a VideoTrack object to represent the video track.
             let kind = match i {
                 0 => DOMString::from_static("main"),
                 _ => DOMString::new(),
             };
-
-            let video_track = VideoTrack::new(
-                cx,
-                self.global().as_window(),
-                DOMString::new(),
-                kind,
-                DOMString::new(),
-                DOMString::new(),
-                Some(&*video_track_list),
-            );
-
-            // Steps 2. Update the media element's videoTracks attribute's VideoTrackList object
-            // with the new VideoTrack object.
-            video_track_list.add(&video_track);
-
-            // Step 3. Let enable be unknown.
-            // Step 4. If either the media resource or the URL of the current media resource
-            // indicate a particular set of video tracks to enable, or if the user agent has
-            // information that would facilitate the selection of specific video tracks to
-            // improve the user's experience, then: if this video track is the first such video
-            // track, then set enable to true, otherwise, set enable to false.
-            if let Some(track) = video_track_list.item(0) &&
-                let Some(servo_url) = self.resource_url.borrow().as_ref()
-            {
-                let fragment = MediaFragmentParser::from(servo_url);
-                if let Some(id) = fragment.id() {
-                    if track.id() == id {
-                        video_track_list.set_selected(0, true);
-                    }
-                } else if fragment.tracks().contains(&track.kind().into()) {
-                    video_track_list.set_selected(0, true);
-                }
-            }
-
-            // Step 5. If enable is still unknown, then, if the media element does not yet have a
-            // selected video track, then set enable to true, otherwise, set enable to false.
-            // Step 6. If enable is true, then select this track and unselect any previously
-            // selected video tracks, otherwise, do not select this video track. If other tracks are
-            // unselected, then a change event will be fired.
-            if video_track_list.selected_index().is_none() {
-                video_track_list.set_selected(video_track_list.len() - 1, true);
-            }
-
-            // Step 7. Fire an event named addtrack at this VideoTrackList object, using TrackEvent,
-            // with the track attribute initialized to the new VideoTrack object.
-            let event = TrackEvent::new(
-                cx,
-                self.global().as_window(),
-                atom!("addtrack"),
-                false,
-                false,
-                &Some(VideoTrackOrAudioTrackOrTextTrack::VideoTrack(video_track)),
-            );
-
-            event
-                .upcast::<Event>()
-                .fire(cx, video_track_list.upcast::<EventTarget>());
+            self.add_video_track(cx, kind);
         }
 
         // => "Once enough of the media data has been fetched to determine the duration..."
+        // With a MediaSource attached, the duration is the MediaSource's.
+        // <https://w3c.github.io/media-source/#htmlmediaelement-extensions-duration>
+        let duration = match self.media_source.get() {
+            Some(media_source) => media_source.duration(),
+            None => metadata
+                .duration
+                .map_or(f64::INFINITY, |duration| duration.as_secs_f64()),
+        };
+        self.media_metadata_established(
+            cx,
+            duration,
+            (metadata.width, metadata.height),
+            metadata.title.clone(),
+        );
+    }
 
+    /// <https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list>
+    /// => "If the media resource is found to have an audio track"
+    fn add_audio_track(&self, cx: &mut JSContext, kind: DOMString) {
+        let audio_track_list = self.AudioTracks(cx);
+
+        // Step 1. Create an AudioTrack object to represent the audio track.
+        let audio_track = AudioTrack::new(
+            cx,
+            self.global().as_window(),
+            DOMString::new(),
+            kind,
+            DOMString::new(),
+            DOMString::new(),
+            Some(&*audio_track_list),
+        );
+
+        // Steps 2. Update the media element's audioTracks attribute's AudioTrackList object
+        // with the new AudioTrack object.
+        audio_track_list.add(&audio_track);
+
+        // Step 3. Let enable be unknown.
+        // Step 4. If either the media resource or the URL of the current media resource
+        // indicate a particular set of audio tracks to enable, or if the user agent has
+        // information that would facilitate the selection of specific audio tracks to
+        // improve the user's experience, then: if this audio track is one of the ones to
+        // enable, then set enable to true, otherwise, set enable to false.
+        if let Some(servo_url) = self.resource_url.borrow().as_ref() {
+            let fragment = MediaFragmentParser::from(servo_url);
+            if let Some(id) = fragment.id() &&
+                audio_track.id() == id
+            {
+                audio_track_list.set_enabled(audio_track_list.len() - 1, true);
+            }
+
+            if fragment.tracks().contains(&audio_track.kind().into()) {
+                audio_track_list.set_enabled(audio_track_list.len() - 1, true);
+            }
+        }
+
+        // Step 5. If enable is still unknown, then, if the media element does not yet have an
+        // enabled audio track, then set enable to true, otherwise, set enable to false.
+        // Step 6. If enable is true, then enable this audio track, otherwise, do not enable
+        // this audio track.
+        if audio_track_list.enabled_index().is_none() {
+            audio_track_list.set_enabled(audio_track_list.len() - 1, true);
+        }
+
+        // Step 7. Fire an event named addtrack at this AudioTrackList object, using TrackEvent,
+        // with the track attribute initialized to the new AudioTrack object.
+        let event = TrackEvent::new(
+            cx,
+            self.global().as_window(),
+            atom!("addtrack"),
+            false,
+            false,
+            &Some(VideoTrackOrAudioTrackOrTextTrack::AudioTrack(audio_track)),
+        );
+
+        event
+            .upcast::<Event>()
+            .fire(cx, audio_track_list.upcast::<EventTarget>());
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list>
+    /// => "If the media resource is found to have a video track"
+    fn add_video_track(&self, cx: &mut JSContext, kind: DOMString) {
+        let video_track_list = self.VideoTracks(cx);
+
+        // Step 1. Create a VideoTrack object to represent the video track.
+        let video_track = VideoTrack::new(
+            cx,
+            self.global().as_window(),
+            DOMString::new(),
+            kind,
+            DOMString::new(),
+            DOMString::new(),
+            Some(&*video_track_list),
+        );
+
+        // Steps 2. Update the media element's videoTracks attribute's VideoTrackList object
+        // with the new VideoTrack object.
+        video_track_list.add(&video_track);
+
+        // Step 3. Let enable be unknown.
+        // Step 4. If either the media resource or the URL of the current media resource
+        // indicate a particular set of video tracks to enable, or if the user agent has
+        // information that would facilitate the selection of specific video tracks to
+        // improve the user's experience, then: if this video track is the first such video
+        // track, then set enable to true, otherwise, set enable to false.
+        if let Some(track) = video_track_list.item(0) &&
+            let Some(servo_url) = self.resource_url.borrow().as_ref()
+        {
+            let fragment = MediaFragmentParser::from(servo_url);
+            if let Some(id) = fragment.id() {
+                if track.id() == id {
+                    video_track_list.set_selected(0, true);
+                }
+            } else if fragment.tracks().contains(&track.kind().into()) {
+                video_track_list.set_selected(0, true);
+            }
+        }
+
+        // Step 5. If enable is still unknown, then, if the media element does not yet have a
+        // selected video track, then set enable to true, otherwise, set enable to false.
+        // Step 6. If enable is true, then select this track and unselect any previously
+        // selected video tracks, otherwise, do not select this video track. If other tracks are
+        // unselected, then a change event will be fired.
+        if video_track_list.selected_index().is_none() {
+            video_track_list.set_selected(video_track_list.len() - 1, true);
+        }
+
+        // Step 7. Fire an event named addtrack at this VideoTrackList object, using TrackEvent,
+        // with the track attribute initialized to the new VideoTrack object.
+        let event = TrackEvent::new(
+            cx,
+            self.global().as_window(),
+            atom!("addtrack"),
+            false,
+            false,
+            &Some(VideoTrackOrAudioTrackOrTextTrack::VideoTrack(video_track)),
+        );
+
+        event
+            .upcast::<Event>()
+            .fire(cx, video_track_list.upcast::<EventTarget>());
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list>
+    /// => "Once enough of the media data has been fetched to determine the duration of the media
+    /// resource, its dimensions, and other metadata"
+    fn media_metadata_established(
+        &self,
+        cx: &mut JSContext,
+        duration: f64,
+        video_size: (u32, u32),
+        title: Option<String>,
+    ) {
         // TODO Step 1. Establish the media timeline for the purposes of the current playback
         // position and the earliest possible position, based on the media data.
 
@@ -3035,28 +3070,15 @@ impl HTMLMediaElement {
         // in principle infinite), update the duration attribute to the value positive Infinity.
         // Note: The user agent will queue a media element task given the media element to fire an
         // event named durationchange at the element at this point.
-        // With a MediaSource attached, the duration is the MediaSource's.
-        // <https://w3c.github.io/media-source/#htmlmediaelement-extensions-duration>
-        if let Some(media_source) = self.media_source.get() {
-            self.duration.set(media_source.duration());
-        } else {
-            self.duration.set(
-                metadata
-                    .duration
-                    .map_or(f64::INFINITY, |duration| duration.as_secs_f64()),
-            );
-        }
+        self.duration.set(duration);
         self.queue_media_element_task_to_fire_event(atom!("durationchange"));
 
         // Step 5. For video elements, set the videoWidth and videoHeight attributes, and queue a
         // media element task given the media element to fire an event named resize at the media
         // element.
         if let Some(video_element) = self.downcast::<HTMLVideoElement>() {
-            video_element.set_natural_dimensions(
-                cx.no_gc(),
-                Some(metadata.width),
-                Some(metadata.height),
-            );
+            let (width, height) = video_size;
+            video_element.set_natural_dimensions(cx.no_gc(), Some(width), Some(height));
             self.queue_media_element_task_to_fire_event(atom!("resize"));
         }
 
@@ -3107,12 +3129,10 @@ impl HTMLMediaElement {
         let window = global.as_window();
 
         // Update the media session metadata title with the obtained metadata.
-        window.Navigator(cx).MediaSession(cx).update_title(
-            metadata
-                .title
-                .clone()
-                .unwrap_or(window.get_url().into_string()),
-        );
+        window
+            .Navigator(cx)
+            .MediaSession(cx)
+            .update_title(title.unwrap_or(window.get_url().into_string()));
     }
 
     /// The attached MediaSource ended its stream with a network error or a
