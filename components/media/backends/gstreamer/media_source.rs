@@ -378,6 +378,10 @@ impl SourceBufferHandle for GStreamerSourceBuffer {
     }
 
     fn set_timestamp_offset(&self, offset: f64) -> Result<(), MediaSourceError> {
+        // mselib (1.28.6 and main) holds the offset as an unsigned GstClockTime.
+        if offset < 0.0 {
+            log::warn!("Negative timestampOffset {offset} is not supported; using 0");
+        }
         self.buffer
             .set_timestamp_offset(clock_time(offset))
             .map_err(map_error)
