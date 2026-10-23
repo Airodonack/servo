@@ -2,12 +2,14 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use script_bindings::cell::DomRefCell;
-use script_bindings::reflector::reflect_dom_object_with_cx;
+use script_bindings::reflector::reflect_weak_referenceable_dom_object;
 use servo_base::generic_channel::GenericCallback;
 use servo_media::player::media_source::{
     AppendMode as BackendAppendMode, OperationId, SourceBufferEvent, SourceBufferHandle,
@@ -30,7 +32,7 @@ use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
-use crate::dom::mediasource::{MediaSource, media_source_error};
+use crate::dom::mediasource::{BackendCallbackTarget, MediaSource, media_source_error};
 use crate::dom::timeranges::{TimeRanges, TimeRangesContainer};
 
 /// <https://w3c.github.io/media-source/#sourcebuffer>
@@ -68,6 +70,10 @@ pub(crate) struct SourceBuffer {
     #[ignore_malloc_size_of = "servo_media"]
     #[no_trace]
     handle: DomRefCell<Option<Box<dyn SourceBufferHandle>>>,
+    /// What the backend's callback reaches this object through.
+    #[ignore_malloc_size_of = "Arc"]
+    #[no_trace]
+    callback_target: RefCell<Option<Arc<Mutex<BackendCallbackTarget<SourceBuffer>>>>>,
 }
 
 impl SourceBuffer {
@@ -86,6 +92,7 @@ impl SourceBuffer {
             update_reported: Cell::new(false),
             operation: Cell::new(None),
             handle: DomRefCell::new(None),
+            callback_target: RefCell::new(None),
         }
     }
 
@@ -96,12 +103,13 @@ impl SourceBuffer {
         media_source: &MediaSource,
         content_type: &str,
     ) -> Fallible<DomRoot<SourceBuffer>> {
-        let buffer: DomRoot<SourceBuffer> = reflect_dom_object_with_cx(
-            Box::new(SourceBuffer::new_inherited(media_source)),
-            global,
+        let buffer: DomRoot<SourceBuffer> = reflect_weak_referenceable_dom_object(
             cx,
+            Rc::new(SourceBuffer::new_inherited(media_source)),
+            global,
         );
-        let this = Trusted::new(&*buffer);
+        let (target, weak_target) = BackendCallbackTarget::new(&*buffer);
+        *buffer.callback_target.borrow_mut() = Some(target);
         let task_source = global
             .task_manager()
             .media_element_task_source()
@@ -110,9 +118,11 @@ impl SourceBuffer {
             let Ok(event) = message else {
                 return;
             };
-            let this = this.clone();
+            let weak_target = weak_target.clone();
             task_source.queue(task!(source_buffer_event: move |cx| {
-                this.root().handle_backend_event(cx, event);
+                if let Some(this) = BackendCallbackTarget::root(&weak_target) {
+                    this.handle_backend_event(cx, event);
+                }
             }));
         })
         .map_err(|_| Error::InvalidState(Some("Could not create a callback".into())))?;
@@ -149,6 +159,7 @@ impl SourceBuffer {
         self.active.set(false);
         self.first_initialization_segment_received.set(false);
         *self.handle.borrow_mut() = None;
+        *self.callback_target.borrow_mut() = None;
     }
 
     /// The buffered ranges as (start, end) pairs in seconds.
