@@ -3103,7 +3103,13 @@ impl HTMLMediaElement {
     /// is queued, so page code runs only once the rest of the algorithm has finished.
     ///
     /// <https://w3c.github.io/media-source/#sourcebuffer-init-segment-received> (step 5)
-    pub(crate) fn add_media_source_tracks(&self, cx: &mut JSContext, tracks: &[MediaSourceTrack]) {
+    /// Returns the ids of the tracks it added.
+    pub(crate) fn add_media_source_tracks(
+        &self,
+        cx: &mut JSContext,
+        tracks: &[MediaSourceTrack],
+    ) -> Vec<String> {
+        let mut added = vec![];
         for track in tracks {
             let id = DOMString::from(track.id.as_str());
             // Step 5.2.5. Let audio kinds be the kinds in the initialization segment, or a single
@@ -3117,6 +3123,7 @@ impl HTMLMediaElement {
                         .any(|existing| existing.id() == id);
                     if !known {
                         self.add_audio_track(cx, id, kind, AddTrackEvent::Queue);
+                        added.push(track.id.clone());
                     }
                 },
                 MediaSourceTrackKind::Video => {
@@ -3126,10 +3133,35 @@ impl HTMLMediaElement {
                         .any(|existing| existing.id() == id);
                     if !known {
                         self.add_video_track(cx, id, kind, AddTrackEvent::Queue);
+                        added.push(track.id.clone());
                     }
                 },
                 // Text tracks of initialization segments are not exposed yet.
                 MediaSourceTrackKind::Text => {},
+            }
+        }
+        added
+    }
+
+    /// Removes the tracks with these ids, which a removed SourceBuffer created.
+    ///
+    /// <https://w3c.github.io/media-source/#dom-mediasource-removesourcebuffer> (steps 3-5)
+    pub(crate) fn remove_media_source_tracks(&self, ids: &[String]) {
+        for id in ids {
+            let id = DOMString::from(id.as_str());
+            if let Some(list) = self.audio_tracks_list.get() &&
+                let Some(track) = (0..list.len())
+                    .filter_map(|index| list.item(index))
+                    .find(|track| track.id() == id)
+            {
+                list.remove(&track);
+            }
+            if let Some(list) = self.video_tracks_list.get() &&
+                let Some(track) = (0..list.len())
+                    .filter_map(|index| list.item(index))
+                    .find(|track| track.id() == id)
+            {
+                list.remove(&track);
             }
         }
     }
