@@ -57,6 +57,35 @@ impl SourceBufferList {
         self.queue_event("addsourcebuffer");
     }
 
+    /// Adds a buffer at its place in `order`, and queues a task to fire
+    /// addsourcebuffer. For activeSourceBuffers, whose buffers join as their
+    /// first initialization segments arrive, in any order: "SourceBuffer
+    /// objects in this list MUST appear in the same order as they appear in
+    /// the sourceBuffers attribute".
+    ///
+    /// <https://w3c.github.io/media-source/#dom-mediasource-activesourcebuffers>
+    pub(crate) fn add_in_order_of(&self, buffer: &SourceBuffer, order: &SourceBufferList) {
+        let rank = |candidate: &SourceBuffer| {
+            order
+                .buffers
+                .borrow()
+                .iter()
+                .position(|other| &**other == candidate)
+        };
+        let position = {
+            let buffers = self.buffers.borrow();
+            let new_rank = rank(buffer);
+            buffers
+                .iter()
+                .position(|other| rank(other) > new_rank)
+                .unwrap_or(buffers.len())
+        };
+        self.buffers
+            .borrow_mut()
+            .insert(position, Dom::from_ref(buffer));
+        self.queue_event("addsourcebuffer");
+    }
+
     /// Removes a buffer and queues a task to fire removesourcebuffer.
     pub(crate) fn remove(&self, buffer: &SourceBuffer) {
         let removed = {

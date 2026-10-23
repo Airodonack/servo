@@ -487,7 +487,8 @@ impl MediaSource {
         // Step 5.4. If active track flag equals true, add this SourceBuffer
         // to activeSourceBuffers and queue addsourcebuffer at it.
         buffer.set_active(true);
-        self.active_source_buffers.add(buffer);
+        self.active_source_buffers
+            .add_in_order_of(buffer, &self.source_buffers);
         // Step 8. If each object in sourceBuffers of the parent media source
         // has [[first initialization segment received flag]] equal to true,
         // and the HTMLMediaElement's readyState attribute is HAVE_NOTHING,
