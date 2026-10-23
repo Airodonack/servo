@@ -599,12 +599,20 @@ impl MediaSource {
                 .as_ref()
                 .and_then(|handle| handle.live_seekable_range());
             let buffered = self.buffered();
-            // If live seekable range is not empty: return the union of live
-            // seekable range and the HTMLMediaElement.buffered attribute.
+            // If live seekable range is not empty: let union ranges be the
+            // union of live seekable range and the HTMLMediaElement's buffered
+            // attribute, and return a single range from the earliest start
+            // time to the highest end time in union ranges.
             if let Some(live_range) = live_range {
-                let mut ranges = buffered;
-                ranges.push((live_range.start, live_range.end));
-                return union_ranges(ranges);
+                let start = buffered
+                    .iter()
+                    .map(|range| range.0)
+                    .fold(live_range.start, f64::min);
+                let end = buffered
+                    .iter()
+                    .map(|range| range.1)
+                    .fold(live_range.end, f64::max);
+                return vec![(start, end)];
             }
             // If the HTMLMediaElement.buffered attribute returns an empty
             // TimeRanges object, then return an empty TimeRanges object.
@@ -630,21 +638,6 @@ fn intersect_ranges(a: &[(f64, f64)], b: &[(f64, f64)]) -> Vec<(f64, f64)> {
             if start < end {
                 result.push((start, end));
             }
-        }
-    }
-    result
-}
-
-fn union_ranges(mut ranges: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
-    ranges.sort_by(|a, b| a.0.total_cmp(&b.0));
-    let mut result: Vec<(f64, f64)> = vec![];
-    for (start, end) in ranges {
-        if let Some(last) = result.last_mut() &&
-            start <= last.1
-        {
-            last.1 = last.1.max(end);
-        } else {
-            result.push((start, end));
         }
     }
     result
