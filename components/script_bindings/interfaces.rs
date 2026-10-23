@@ -134,6 +134,10 @@ pub trait DocumentHelpers {
     fn ensure_safe_to_run_script_or_layout(&self);
 }
 
+pub trait MediaSourceHelpers {
+    fn is_supported_by_media_backend(cx: &mut JSContext, global: HandleObject) -> bool;
+}
+
 pub trait ServoInternalsHelpers {
     fn is_servo_internal(cx: &mut JSContext, global: HandleObject) -> bool;
 }

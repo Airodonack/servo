@@ -70,12 +70,18 @@
               test.expectEvent(mediaSource.sourceBuffers, "addsourcebuffer", "sourceBuffers");
               var sourceBufferA = mediaSource.addSourceBuffer(MediaSourceUtil.VIDEO_ONLY_TYPE);
               var sourceBufferB = mediaSource.addSourceBuffer(MediaSourceUtil.AUDIO_ONLY_TYPE);
+              var removedFromSourceBuffers = 0;
+              var removedFromActiveSourceBuffers = 0;
 
               verifySourceBufferLists(mediaSource, [sourceBufferA, sourceBufferB]);
 
               test.waitForExpectedEvents(function()
               {
                   verifySourceBufferLists(mediaSource, [sourceBufferA, sourceBufferB]);
+
+                  // These listeners stay, so they count every event, not only the first.
+                  mediaSource.sourceBuffers.addEventListener("removesourcebuffer", function() { ++removedFromSourceBuffers; });
+                  mediaSource.activeSourceBuffers.addEventListener("removesourcebuffer", function() { ++removedFromActiveSourceBuffers; });
 
                   // Force the media element to close the MediaSource object.
                   test.expectEvent(mediaSource.sourceBuffers, "removesourcebuffer", "sourceBuffers");
@@ -88,6 +94,8 @@
                   assert_equals(mediaSource.readyState, "closed", "mediaSource is closed.");
 
                   verifySourceBufferLists(mediaSource, []);
+                  assert_equals(removedFromSourceBuffers, 1, "removesourcebuffer events at sourceBuffers");
+                  assert_equals(removedFromActiveSourceBuffers, 1, "removesourcebuffer events at activeSourceBuffers");
                   test.done();
               });
           }, "Test that only 1 removesourcebuffer event fires on each SourceBufferList when the MediaSource closes.");
