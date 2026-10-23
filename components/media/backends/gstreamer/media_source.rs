@@ -11,8 +11,8 @@
 
 use std::collections::VecDeque;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use glib::translate::{FromGlibPtrFull, ToGlibPtr};
 use gstreamer::prelude::*;
@@ -20,8 +20,8 @@ use gstreamer_mse as gst_mse;
 use servo_base::generic_channel::GenericCallback;
 use servo_media_player::media_source::{
     AppendMode, BufferedRanges, EndOfStreamError, MediaSourceError, MediaSourceEvent,
-    MediaSourceHandle, MediaSourceReadyState, MediaSourceTrack, MediaSourceTrackKind,
-    OperationId, SourceBufferEvent, SourceBufferHandle, SourceBufferReport,
+    MediaSourceHandle, MediaSourceReadyState, MediaSourceTrack, MediaSourceTrackKind, OperationId,
+    SourceBufferEvent, SourceBufferHandle, SourceBufferReport,
 };
 
 use crate::player::clock_time;
@@ -38,7 +38,6 @@ fn map_error(error: glib::Error) -> MediaSourceError {
         _ => MediaSourceError::Backend(error.to_string()),
     }
 }
-
 
 fn seconds(time: Option<gstreamer::ClockTime>) -> Option<f64> {
     time.map(|time| time.seconds_f64())
@@ -255,7 +254,13 @@ impl GStreamerSourceBuffer {
                     }
                     operations.signalled
                 };
-                notify!(callback, SourceBufferReport { operation, event: event.clone() });
+                notify!(
+                    callback,
+                    SourceBufferReport {
+                        operation,
+                        event: event.clone()
+                    }
+                );
             }
         };
         buffer.connect_on_update_start(report(SourceBufferEvent::UpdateStart));

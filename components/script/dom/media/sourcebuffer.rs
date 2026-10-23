@@ -250,7 +250,8 @@ impl SourceBuffer {
         if active {
             // Step 6. Set [[first initialization segment received flag]] to true.
             self.first_initialization_segment_received.set(true);
-            self.media_source.first_initialization_segment_received(cx, self);
+            self.media_source
+                .first_initialization_segment_received(cx, self);
         }
     }
 
@@ -398,7 +399,11 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
 
     /// <https://w3c.github.io/media-source/#dom-sourcebuffer-timestampoffset>
     fn SetTimestampOffset(&self, value: Finite<f64>) -> ErrorResult {
-        debug!("SourceBuffer({}): timestampOffset = {}", self.content_type(), *value);
+        debug!(
+            "SourceBuffer({}): timestampOffset = {}",
+            self.content_type(),
+            *value
+        );
         // Steps 2-3, 5. Removed or updating: InvalidStateError; ended: reopen.
         self.check_state(true)?;
         // Steps 6-7. In sequence mode the group start timestamp follows.
@@ -571,7 +576,11 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
 
     /// <https://w3c.github.io/media-source/#dom-sourcebuffer-remove>
     fn Remove(&self, _cx: &mut JSContext, start: Finite<f64>, end: f64) -> ErrorResult {
-        debug!("SourceBuffer({}): remove({}, {end})", self.content_type(), *start);
+        debug!(
+            "SourceBuffer({}): remove({}, {end})",
+            self.content_type(),
+            *start
+        );
         // Steps 1-2. Removed or updating: InvalidStateError.
         self.check_state(false)?;
         // Step 3. If duration equals NaN, then throw a TypeError exception.
