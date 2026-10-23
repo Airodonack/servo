@@ -130,7 +130,11 @@ impl SourceBuffer {
             Some(handle) => handle
                 .add_source_buffer(content_type, callback)
                 .map_err(media_source_error)?,
-            None => return Err(Error::InvalidState(None)),
+            None => {
+                return Err(Error::InvalidState(Some(
+                    "The media source is not ready".into(),
+                )));
+            },
         };
         *buffer.handle.borrow_mut() = Some(handle);
         Ok(buffer)
@@ -317,7 +321,9 @@ impl SourceBuffer {
     /// InvalidStateError, and an ended media source is reopened.
     fn check_state(&self, reopen: bool) -> ErrorResult {
         if self.removed.get() || self.updating.get() {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "The source buffer has been removed or is being updated".into(),
+            )));
         }
         if reopen && self.media_source.ready_state() == ReadyState::Ended {
             self.media_source.open();
@@ -328,7 +334,9 @@ impl SourceBuffer {
     fn with_handle<T>(&self, f: impl FnOnce(&dyn SourceBufferHandle) -> T) -> Fallible<T> {
         match self.handle.borrow().as_ref() {
             Some(handle) => Ok(f(handle.as_ref())),
-            None => Err(Error::InvalidState(None)),
+            None => Err(Error::InvalidState(Some(
+                "The source buffer is not ready".into(),
+            ))),
         }
     }
 }
@@ -377,7 +385,9 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
         // attribute of the parent media source then throw an InvalidStateError
         // exception.
         if self.removed.get() {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "The source buffer has been removed".into(),
+            )));
         }
         // Steps 2-5. The backend intersects the track buffer ranges.
         let mut ranges = TimeRangesContainer::default();
@@ -485,7 +495,9 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
         // Steps 3-4. If the HTMLMediaElement's error attribute is not null,
         // then throw an InvalidStateError exception.
         if self.media_source.element_has_error() {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "The media element has an error".into(),
+            )));
         }
         // Step 5. If the parent media source is "ended", reopen it.
         self.check_state(true)?;
@@ -529,7 +541,9 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
         // Step 2. If the readyState attribute of the parent media source is
         // not in the "open" state then throw an InvalidStateError exception.
         if self.removed.get() || self.media_source.ready_state() != ReadyState::Open {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "The source buffer has been removed or the media source is not open".into(),
+            )));
         }
         // Step 3. If the range removal algorithm is running, then throw an
         // InvalidStateError exception. (An abort during a remove is refused by
@@ -537,7 +551,9 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
         // Step 3. If the range removal algorithm is running, then throw an
         // InvalidStateError exception.
         if self.updating.get() && self.removing.get() {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "A range removal is in progress".into(),
+            )));
         }
         // Steps 4-5. If the buffer append algorithm is running, abort it: set
         // updating to false and queue abort and updateend.
@@ -564,7 +580,9 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
         // Step 4. If type contains a MIME type that is not supported, then
         // throw a NotSupportedError exception.
         if !crate::dom::mediasource::is_valid_media_source_type(&type_.str()) {
-            return Err(Error::NotSupported(None));
+            return Err(Error::NotSupported(Some(
+                "The content type is not supported".into(),
+            )));
         }
         // Step 5. If the parent media source is "ended", reopen it.
         self.check_state(true)?;

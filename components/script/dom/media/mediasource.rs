@@ -82,10 +82,16 @@ impl<T: WeakReferenceable> BackendCallbackTarget<T> {
 /// Maps a backend refusal to the exception the Media Source spec names.
 pub(crate) fn media_source_error(error: MediaSourceError) -> Error {
     match error {
-        MediaSourceError::InvalidState => Error::InvalidState(None),
+        MediaSourceError::InvalidState => Error::InvalidState(Some(
+            "The media source does not allow this operation in its current state".into(),
+        )),
         MediaSourceError::Type => Error::Type(c"Invalid content type".to_owned()),
-        MediaSourceError::NotSupported => Error::NotSupported(None),
-        MediaSourceError::NotFound => Error::NotFound(None),
+        MediaSourceError::NotSupported => {
+            Error::NotSupported(Some("The content type is not supported".into()))
+        },
+        MediaSourceError::NotFound => Error::NotFound(Some(
+            "The source buffer does not belong to this media source".into(),
+        )),
         MediaSourceError::QuotaExceeded => Error::QuotaExceeded {
             quota: None,
             requested: None,
@@ -736,12 +742,16 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         // Step 2. If the readyState attribute is not "open" then throw an
         // InvalidStateError exception.
         if self.ready_state.get() != ReadyState::Open {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "The media source is not open".into(),
+            )));
         }
         // Step 3. If the updating attribute equals true on any SourceBuffer in
         // sourceBuffers, then throw an InvalidStateError exception.
         if self.any_updating() {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "A source buffer is being updated".into(),
+            )));
         }
         // Step 4. Run the duration change algorithm with new duration set to
         // the value being assigned to this attribute.
@@ -780,7 +790,9 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
             !ServoMedia::get().is_media_source_type_supported(&type_.str())
         {
             debug!("MediaSource: addSourceBuffer({type_}) refused: unsupported type");
-            return Err(Error::NotSupported(None));
+            return Err(Error::NotSupported(Some(
+                "The content type is not supported".into(),
+            )));
         }
         debug!("MediaSource: addSourceBuffer({type_})");
         // Step 3. If the user agent can't handle any more SourceBuffer objects,
@@ -794,7 +806,9 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         // Step 4. If the readyState attribute is not in the "open" state then
         // throw an InvalidStateError exception.
         if self.ready_state.get() != ReadyState::Open {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "The media source is not open".into(),
+            )));
         }
         // Steps 5-7. Let buffer be a new SourceBuffer with its associated
         // resources; the backend sets its mode from the byte stream format.
@@ -813,7 +827,9 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         // Step 1. If sourceBuffer specifies an object that is not in
         // sourceBuffers then throw a NotFoundError exception.
         if !self.source_buffers.contains(source_buffer) {
-            return Err(Error::NotFound(None));
+            return Err(Error::NotFound(Some(
+                "The source buffer does not belong to this media source".into(),
+            )));
         }
         // Step 2. If the sourceBuffer.updating attribute equals true, then
         // abort the buffer append algorithm, set updating to false and queue
@@ -847,12 +863,16 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         // Step 1. If the readyState attribute is not in the "open" state then
         // throw an InvalidStateError exception.
         if self.ready_state.get() != ReadyState::Open {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "The media source is not open".into(),
+            )));
         }
         // Step 2. If the updating attribute equals true on any SourceBuffer in
         // sourceBuffers, then throw an InvalidStateError exception.
         if self.any_updating() {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "A source buffer is being updated".into(),
+            )));
         }
         // Step 3. Run the end of stream algorithm with the error parameter set
         // to error.
@@ -875,7 +895,9 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         // Step 1. If the readyState attribute is not "open" then throw an
         // InvalidStateError exception.
         if self.ready_state.get() != ReadyState::Open {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "The media source is not open".into(),
+            )));
         }
         // Step 2. If start is negative or greater than end, then throw a
         // TypeError exception.
@@ -898,7 +920,9 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         // Step 1. If the readyState attribute is not "open" then throw an
         // InvalidStateError exception.
         if self.ready_state.get() != ReadyState::Open {
-            return Err(Error::InvalidState(None));
+            return Err(Error::InvalidState(Some(
+                "The media source is not open".into(),
+            )));
         }
         // Step 2. If live seekable range contains a range, then set live
         // seekable range to be a new empty TimeRanges object.
