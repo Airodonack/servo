@@ -49,6 +49,8 @@ pub(crate) struct SourceBuffer {
     append_window_end: Cell<f64>,
     /// Whether this buffer is in the parent's activeSourceBuffers.
     active: Cell<bool>,
+    /// <https://w3c.github.io/media-source/#dfn-first-initialization-segment-received-flag>
+    first_initialization_segment_received: Cell<bool>,
     /// Whether the update in progress is a remove, which abort() must refuse.
     removing: Cell<bool>,
     /// Whether the backend reported success (update) for the update in
@@ -71,6 +73,7 @@ impl SourceBuffer {
             append_window_start: Cell::new(0.0),
             append_window_end: Cell::new(f64::INFINITY),
             active: Cell::new(false),
+            first_initialization_segment_received: Cell::new(false),
             removing: Cell::new(false),
             update_reported: Cell::new(false),
             handle: DomRefCell::new(None),
@@ -149,6 +152,7 @@ impl SourceBuffer {
         self.removed.set(true);
         self.updating.set(false);
         self.active.set(false);
+        self.first_initialization_segment_received.set(false);
         *self.handle.borrow_mut() = None;
     }
 
@@ -165,6 +169,10 @@ impl SourceBuffer {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    pub(crate) fn first_initialization_segment_received(&self) -> bool {
+        self.first_initialization_segment_received.get()
     }
 
     pub(crate) fn set_active(&self, active: bool) {
@@ -208,12 +216,15 @@ impl SourceBuffer {
         }
     }
 
-    /// Once the backend has processed an initialization segment the buffer
-    /// joins activeSourceBuffers and the duration gets its initial value.
+    /// Once the backend has processed the first initialization segment the
+    /// buffer joins activeSourceBuffers, its tracks are added to the media
+    /// element, and the duration gets its initial value. mselib makes a
+    /// buffer active exactly when it processes its first initialization
+    /// segment, so the two are not told apart here.
     ///
-    /// <https://w3c.github.io/media-source/#dfn-initialization-segment-received>
-    fn initialization_segment_received(&self) {
-        if self.active.get() {
+    /// <https://w3c.github.io/media-source/#sourcebuffer-init-segment-received>
+    fn initialization_segment_received(&self, cx: &mut JSContext) {
+        if self.first_initialization_segment_received.get() {
             return;
         }
         let active = self
@@ -222,11 +233,13 @@ impl SourceBuffer {
             .as_ref()
             .is_some_and(|handle| handle.is_active());
         if active {
-            self.media_source.activate_source_buffer(self);
+            // Step 6. Set [[first initialization segment received flag]] to true.
+            self.first_initialization_segment_received.set(true);
+            self.media_source.first_initialization_segment_received(cx, self);
         }
     }
 
-    fn handle_backend_event(&self, _cx: &mut JSContext, event: SourceBufferEvent) {
+    fn handle_backend_event(&self, cx: &mut JSContext, event: SourceBufferEvent) {
         debug!(
             "SourceBuffer({}): backend {event:?}, buffered {:?}",
             self.content_type(),
@@ -242,12 +255,12 @@ impl SourceBuffer {
             SourceBufferEvent::UpdateStart => {},
             SourceBufferEvent::Update => {
                 self.update_reported.set(true);
-                self.initialization_segment_received();
+                self.initialization_segment_received(cx);
                 self.queue_event("update");
             },
             SourceBufferEvent::UpdateEnd => {
                 self.updating.set(false);
-                self.initialization_segment_received();
+                self.initialization_segment_received(cx);
                 // updateend after a success is preceded by update.
                 if !self.update_reported.get() {
                     self.queue_event("update");
