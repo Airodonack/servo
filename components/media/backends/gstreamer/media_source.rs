@@ -13,7 +13,7 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use glib::translate::{FromGlibPtrNone, ToGlibPtr};
+use glib::translate::{FromGlibPtrFull, ToGlibPtr};
 use gstreamer::prelude::*;
 use gstreamer_mse as gst_mse;
 use servo_base::generic_channel::GenericCallback;
@@ -279,9 +279,11 @@ impl SourceBufferHandle for GStreamerSourceBuffer {
                 &mut error,
             );
             if !error.is_null() {
-                let error = glib::Error::from_glib_none(error);
-                glib::ffi::g_error_free(error.to_glib_none().0);
+                let error = glib::Error::from_glib_full(error);
                 log::warn!("Could not get buffered ranges: {error}");
+                if !array.is_null() {
+                    glib::ffi::g_array_unref(array);
+                }
                 return vec![];
             }
             if array.is_null() {
