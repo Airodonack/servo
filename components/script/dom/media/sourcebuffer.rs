@@ -56,6 +56,12 @@ pub(crate) struct SourceBuffer {
     /// Whether the backend reported success (update) for the update in
     /// progress; updateend implies it on success.
     update_reported: Cell<bool>,
+    /// Whether the backend has reported the start of the update in progress.
+    /// Outcomes it reports before that belong to an earlier operation: mselib
+    /// (checked in 1.28.6) signals update and update-end every second while
+    /// a buffer is idle, and one of those can arrive after the next append
+    /// started.
+    backend_update_started: Cell<bool>,
     /// The backend side of this buffer. It holds the appended data and the
     /// buffered ranges, and reports the outcome of appends and removes.
     #[ignore_malloc_size_of = "servo_media"]
@@ -76,6 +82,7 @@ impl SourceBuffer {
             first_initialization_segment_received: Cell::new(false),
             removing: Cell::new(false),
             update_reported: Cell::new(false),
+            backend_update_started: Cell::new(false),
             handle: DomRefCell::new(None),
         }
     }
@@ -202,6 +209,7 @@ impl SourceBuffer {
         self.updating.set(true);
         self.removing.set(removing);
         self.update_reported.set(false);
+        self.backend_update_started.set(false);
         self.queue_event("updatestart");
     }
 
@@ -250,8 +258,15 @@ impl SourceBuffer {
         if self.removed.get() || !self.updating.get() {
             return;
         }
-        match event {
+        if event == SourceBufferEvent::UpdateStart {
             // updatestart is queued when the operation starts.
+            self.backend_update_started.set(true);
+            return;
+        }
+        if !self.backend_update_started.get() {
+            return;
+        }
+        match event {
             SourceBufferEvent::UpdateStart => {},
             SourceBufferEvent::Update => {
                 self.update_reported.set(true);
