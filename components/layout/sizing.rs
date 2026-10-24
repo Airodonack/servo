@@ -12,11 +12,13 @@ use app_units::{Au, MAX_AU};
 use malloc_size_of_derive::MallocSizeOf;
 use style::Zero;
 use style::logical_geometry::LogicalAxis;
+use style::properties::ComputedValues;
 use style::values::computed::{
     LengthPercentage, MaxSize as StyleMaxSize, Percentage, Size as StyleSize,
 };
 
 use crate::context::LayoutContext;
+use crate::fragment_tree::FragmentFlags;
 use crate::layout_box_base::LayoutBoxBase;
 use crate::style_ext::{AspectRatio, Clamp, ComputedValuesExt, ContentBoxSizesAndPBM, LayoutStyle};
 use crate::{ConstraintSpace, IndefiniteContainingBlock, LogicalVec2};
@@ -658,6 +660,135 @@ impl SizeConstraint {
     }
 }
 
+impl SizeConstraint {
+    /// If this is indefinite, makes it definite with the given size transferred through
+    /// a preferred aspect ratio, clamped by the minimum and maximum. A size transferred
+    /// from a definite size is itself definite.
+    /// <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-size-transfers>
+    #[inline]
+    pub(crate) fn or_transferred(self, transferred_size: Option<TransferredSize>) -> Self {
+        match (self, transferred_size) {
+            (Self::MinMax(min_size, max_size), Some(transferred_size)) => Self::Definite(
+                transferred_size
+                    .size
+                    .clamp_between_extremums(min_size, max_size),
+            ),
+            _ => self,
+        }
+    }
+}
+
+/// A size in the ratio-dependent axis of a non-replaced box with a preferred aspect
+/// ratio, transferred from the box's size in the other axis.
+///
+/// It stands in for the size of the contents in that axis, as the natural size of
+/// a replaced element does: an automatic preferred size, or an intrinsic size keyword,
+/// then resolves to it, and the minimum and maximum sizes apply after.
+///
+/// <https://drafts.csswg.org/css-sizing-4/#aspect-ratio>
+/// > If a box has a preferred aspect ratio, its automatic sizes are calculated using
+/// > the aspect ratio, as for a replaced element with a natural aspect ratio and no
+/// > natural size in that axis.
+///
+/// <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-minimum>
+/// > In order to avoid unintentional overflow, the automatic minimum size in the
+/// > ratio-dependent axis of a box with a preferred aspect ratio that is neither
+/// > a replaced element nor a scroll container is its min-content size capped by
+/// > its maximum size.
+///
+/// Whether the box scrolls is decided by the overflow value in the ratio-dependent axis
+/// alone, as other engines do: a box that only scrolls in the other axis still grows to
+/// fit its contents.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TransferredSize {
+    size: Au,
+    /// Whether the minimum size in the ratio-dependent axis is `auto` and the box
+    /// doesn't scroll in that axis, so its contents floor the transferred size.
+    contents_are_minimum: bool,
+}
+
+impl TransferredSize {
+    pub(crate) fn new(
+        ratio: AspectRatio,
+        ratio_dependent_axis: LogicalAxis,
+        ratio_determining_size: Au,
+        style: &ComputedValues,
+        fragment_flags: FragmentFlags,
+    ) -> Self {
+        let min_size = style.min_box_size(style.writing_mode);
+        let min_size_is_auto = match ratio_dependent_axis {
+            LogicalAxis::Inline => min_size.inline.is_initial(),
+            LogicalAxis::Block => min_size.block.is_initial(),
+        };
+        let overflow = style.effective_overflow(fragment_flags);
+        let overflow_in_ratio_dependent_axis =
+            match (ratio_dependent_axis, style.writing_mode.is_horizontal()) {
+                (LogicalAxis::Inline, true) | (LogicalAxis::Block, false) => overflow.x,
+                (LogicalAxis::Inline, false) | (LogicalAxis::Block, true) => overflow.y,
+            };
+        Self {
+            // With `box-sizing: border-box`, the padding and border can exceed the size
+            // given by the ratio, leaving no room for the content box.
+            size: ratio
+                .compute_dependent_size(ratio_dependent_axis, ratio_determining_size)
+                .max(Au::zero()),
+            contents_are_minimum: min_size_is_auto &&
+                !overflow_in_ratio_dependent_axis.is_scrollable(),
+        }
+    }
+
+    /// The size of the box's contents in the ratio-dependent axis, given the size
+    /// the contents would have on their own.
+    ///
+    /// Flooring by the contents only when the minimum size is `auto` gives the same
+    /// result as the automatic minimum size of the spec: since the maximum size is
+    /// applied after, `max(transferred, contents)` clamped by the maximum equals the
+    /// transferred size clamped between `min(contents, maximum)` and the maximum.
+    pub(crate) fn content_size(&self, get_content_size: impl FnOnce() -> Au) -> Au {
+        if self.contents_are_minimum {
+            self.size.max(get_content_size())
+        } else {
+            self.size
+        }
+    }
+}
+
+/// Transfers the block constraint of a non-replaced box with a preferred aspect ratio
+/// into its inline content sizes, as [`ReplacedContents`] does with its natural sizes.
+/// A definite block size gives the inline size; otherwise the transferred minimum and
+/// maximum block sizes clamp the inline sizes of the contents.
+///
+/// [`ReplacedContents`]: crate::replaced::ReplacedContents
+pub(crate) fn transfer_inline_content_sizes(
+    result: InlineContentSizesResult,
+    constraint_space: &ConstraintSpace,
+    style: &ComputedValues,
+    fragment_flags: FragmentFlags,
+) -> InlineContentSizesResult {
+    let Some(ratio) = constraint_space.preferred_aspect_ratio else {
+        return result;
+    };
+    let transfer = |size| ratio.compute_dependent_size(LogicalAxis::Inline, size);
+    let sizes = match constraint_space.block_size {
+        SizeConstraint::Definite(block_size) => TransferredSize::new(
+            ratio,
+            LogicalAxis::Inline,
+            block_size,
+            style,
+            fragment_flags,
+        )
+        .content_size(|| result.sizes.min_content)
+        .into(),
+        SizeConstraint::MinMax(min_size, max_size) => result
+            .sizes
+            .map(|size| size.clamp_between_extremums(transfer(min_size), max_size.map(transfer))),
+    };
+    InlineContentSizesResult {
+        sizes,
+        depends_on_block_constraints: true,
+    }
+}
+
 impl From<Option<Au>> for SizeConstraint {
     fn from(size: Option<Au>) -> Self {
         size.map(SizeConstraint::Definite).unwrap_or_default()
@@ -788,6 +919,7 @@ impl Sizes {
     }
 }
 
+#[derive(Clone)]
 struct LazySizeData<'a> {
     sizes: &'a Sizes,
     axis: LogicalAxis,
@@ -803,6 +935,7 @@ struct LazySizeData<'a> {
 pub(crate) struct LazySize<'a> {
     result: OnceCell<Au>,
     data: Option<LazySizeData<'a>>,
+    transferred_size: Option<TransferredSize>,
 }
 
 impl<'a> LazySize<'a> {
@@ -824,6 +957,7 @@ impl<'a> LazySize<'a> {
                 stretch_size,
                 is_table,
             }),
+            transferred_size: None,
         }
     }
 
@@ -838,6 +972,17 @@ impl<'a> LazySize<'a> {
         Self {
             result: OnceCell::new(),
             data: None,
+            transferred_size: None,
+        }
+    }
+
+    /// Returns a copy of this [`LazySize`] that uses the given [`TransferredSize`] in place
+    /// of the intrinsic size, for a non-replaced box with a preferred aspect ratio.
+    pub(crate) fn with_transferred_size(&self, transferred_size: TransferredSize) -> Self {
+        Self {
+            result: self.result.clone(),
+            data: self.data.clone(),
+            transferred_size: Some(transferred_size),
         }
     }
 
@@ -846,6 +991,10 @@ impl<'a> LazySize<'a> {
     ///
     /// TODO: The intrinsic size should probably be a [`ContentSizes`] instead of [`Au`].
     pub(crate) fn resolve(&self, get_content_size: impl FnOnce() -> Au) -> Au {
+        let get_content_size = || match self.transferred_size {
+            Some(transferred_size) => transferred_size.content_size(get_content_size),
+            None => get_content_size(),
+        };
         *self.result.get_or_init(|| {
             let Some(ref data) = self.data else {
                 return get_content_size();
@@ -868,6 +1017,10 @@ impl From<Au> for LazySize<'_> {
     fn from(value: Au) -> Self {
         let result = OnceCell::new();
         result.set(value).unwrap();
-        LazySize { result, data: None }
+        LazySize {
+            result,
+            data: None,
+            transferred_size: None,
+        }
     }
 }
