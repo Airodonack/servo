@@ -12,6 +12,7 @@ use style::context::SharedStyleContext;
 use style::logical_geometry::Direction;
 use style::properties::ComputedValues;
 use style::selector_parser::PseudoElement;
+use style::values::specified::box_::DisplayInside as StyloDisplayInside;
 
 use crate::context::LayoutContext;
 use crate::dom::WeakLayoutBox;
@@ -24,13 +25,14 @@ use crate::positioned::{LayoutRootLayoutInputs, PositioningContext};
 use crate::replaced::ReplacedContents;
 use crate::sizing::{
     self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize,
+    TransferredSize,
 };
-use crate::style_ext::{AspectRatio, Display, DisplayInside, LayoutStyle};
+use crate::style_ext::{AspectRatio, ComputedValuesExt, Display, DisplayInside, LayoutStyle};
 use crate::table::Table;
 use crate::taffy::TaffyContainer;
 use crate::{
-    ArcRefCell, ConstraintSpace, ContainingBlock, IndefiniteContainingBlock, LogicalVec2,
-    PropagatedBoxTreeData,
+    ArcRefCell, ConstraintSpace, ContainingBlock, ContainingBlockSize, IndefiniteContainingBlock,
+    LogicalVec2, PropagatedBoxTreeData,
 };
 
 /// <https://drafts.csswg.org/css-display/#independent-formatting-context>
@@ -285,8 +287,39 @@ impl IndependentFormattingContext {
         layout_context: &LayoutContext,
         constraint_space: &ConstraintSpace,
     ) -> InlineContentSizesResult {
-        self.base
-            .inline_content_sizes(layout_context, constraint_space, &self.contents)
+        let result =
+            self.base
+                .inline_content_sizes(layout_context, constraint_space, &self.contents);
+        if self.is_replaced() {
+            // Replaced contents already account for the preferred aspect ratio.
+            return result;
+        }
+        sizing::transfer_inline_content_sizes(
+            result,
+            constraint_space,
+            self.style(),
+            self.base_fragment_info().flags,
+        )
+    }
+
+    /// The block size transferred from the given inline size through the preferred
+    /// aspect ratio, for a non-replaced box. Replaced contents handle their ratio
+    /// themselves, through their natural sizes.
+    pub(crate) fn transferred_block_size(
+        &self,
+        preferred_aspect_ratio: Option<AspectRatio>,
+        inline_size: Au,
+    ) -> Option<TransferredSize> {
+        if self.is_replaced() {
+            return None;
+        }
+        Some(TransferredSize::new(
+            preferred_aspect_ratio?,
+            Direction::Block,
+            inline_size,
+            self.style(),
+            self.base_fragment_info().flags,
+        ))
     }
 
     /// Computes the tentative intrinsic block sizes that may be needed while computing
@@ -519,15 +552,59 @@ impl IndependentFormattingContext {
             name: "IndependentFormattingContext::layout cache miss",
             required = ?containing_block_for_children.size,
         );
+        // A non-replaced box with a preferred aspect ratio takes its automatic block size
+        // from its inline size through the ratio. That size is definite, so the contents
+        // of a block container resolve their percentages against it. Flex and grid
+        // containers keep an indefinite block size, since their contents may still make
+        // them taller than the ratio (the automatic minimum size), and sizing their tracks
+        // against the transferred size would hide that.
+        let transferred_block_size = self.transferred_block_size(
+            preferred_aspect_ratio,
+            containing_block_for_children.size.inline,
+        );
+        let containing_block_for_children_with_ratio;
+        let lazy_block_size_with_ratio;
+        let (containing_block_for_contents, lazy_block_size_for_contents) =
+            match transferred_block_size {
+                Some(transferred_block_size) => {
+                    let block_size = if self.is_block_container() {
+                        containing_block_for_children
+                            .size
+                            .block
+                            .or_transferred(Some(transferred_block_size))
+                    } else {
+                        containing_block_for_children.size.block
+                    };
+                    containing_block_for_children_with_ratio = ContainingBlock {
+                        size: ContainingBlockSize {
+                            inline: containing_block_for_children.size.inline,
+                            block: block_size,
+                        },
+                        style: containing_block_for_children.style,
+                    };
+                    lazy_block_size_with_ratio =
+                        lazy_block_size.with_transferred_size(transferred_block_size);
+                    (
+                        &containing_block_for_children_with_ratio,
+                        &lazy_block_size_with_ratio,
+                    )
+                },
+                None => (containing_block_for_children, lazy_block_size),
+            };
+
         let mut child_positioning_context = PositioningContext::default();
-        let result = self.layout_without_caching(
+        let mut result = self.layout_without_caching(
             layout_context,
             &mut child_positioning_context,
-            containing_block_for_children,
+            containing_block_for_contents,
             containing_block,
             preferred_aspect_ratio,
-            lazy_block_size,
+            lazy_block_size_for_contents,
         );
+        if let Some(transferred_block_size) = transferred_block_size {
+            result.content_block_size =
+                transferred_block_size.content_size(|| result.content_block_size);
+        }
         self.base.cache_independent_formatting_context_layout(
             containing_block_for_children,
             &child_positioning_context,
@@ -579,8 +656,14 @@ impl IndependentFormattingContext {
             IndependentFormattingContextContents::Replaced(replaced, _) => {
                 replaced.preferred_aspect_ratio(self.style(), padding_border_sums)
             },
-            // TODO: support preferred aspect ratios on non-replaced boxes.
-            _ => None,
+            // TODO: support preferred aspect ratios on tables.
+            IndependentFormattingContextContents::Table(_) => None,
+            // <https://drafts.csswg.org/css-sizing-4/#aspect-ratio>
+            // > Applies to: all elements except inline boxes and internal ruby or table boxes
+            _ if self.style().get_box().display.inside() == StyloDisplayInside::TableCell => None,
+            _ => self
+                .style()
+                .preferred_aspect_ratio(None, padding_border_sums),
         }
     }
 

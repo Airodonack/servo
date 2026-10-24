@@ -2284,29 +2284,9 @@ impl FlexItemBox {
                 _ => None,
             });
 
-        // <https://drafts.csswg.org/css-flexbox/#algo-main-item>
-        let flex_base_size_is_definite = Cell::new(true);
-        let main_content_sizes = LazyCell::new(|| {
+        // The min-content and max-content sizes of the item in the main axis.
+        let main_content_sizes_of_item = LazyCell::new(|| {
             let flex_item = &self.independent_formatting_context;
-            // > B: If the flex item has ...
-            // >   - a preferred aspect ratio,
-            // >   - a used flex basis of content, and
-            // >   - a definite cross size,
-            // > then the flex base size is calculated from its used cross size and the flex item’s aspect ratio.
-            if let Some(transferred_size_suggestion) = *transferred_size_suggestion {
-                return transferred_size_suggestion.into();
-            }
-
-            flex_base_size_is_definite.set(false);
-
-            // FIXME: implement cases C, D.
-
-            // > E. Otherwise, size the item into the available space using its used flex basis in place of
-            // > its main size, treating a value of content as max-content. If a cross size is needed to
-            // > determine the main size (e.g. when the flex item’s main size is in its block axis, or when
-            // > it has a preferred aspect ratio) and the flex item’s cross size is auto and not definite,
-            // > in this calculation use fit-content as the flex item’s cross size. The flex base size is
-            // > the item’s resulting main size.
             if cross_axis_is_item_block_axis {
                 // The main axis is the inline axis, so we can get the content size from the normal
                 // preferred widths calculation.
@@ -2335,6 +2315,31 @@ impl FlexItemBox {
                 )
                 .into()
             }
+        });
+
+        // <https://drafts.csswg.org/css-flexbox/#algo-main-item>
+        let flex_base_size_is_definite = Cell::new(true);
+        let main_content_sizes = LazyCell::new(|| {
+            // > B: If the flex item has ...
+            // >   - a preferred aspect ratio,
+            // >   - a used flex basis of content, and
+            // >   - a definite cross size,
+            // > then the flex base size is calculated from its used cross size and the flex item’s aspect ratio.
+            if let Some(transferred_size_suggestion) = *transferred_size_suggestion {
+                return transferred_size_suggestion.into();
+            }
+
+            flex_base_size_is_definite.set(false);
+
+            // FIXME: implement cases C, D.
+
+            // > E. Otherwise, size the item into the available space using its used flex basis in place of
+            // > its main size, treating a value of content as max-content. If a cross size is needed to
+            // > determine the main size (e.g. when the flex item’s main size is in its block axis, or when
+            // > it has a preferred aspect ratio) and the flex item’s cross size is auto and not definite,
+            // > in this calculation use fit-content as the flex item’s cross size. The flex base size is
+            // > the item’s resulting main size.
+            *main_content_sizes_of_item
         });
 
         let flex_base_size = self
@@ -2369,12 +2374,19 @@ impl FlexItemBox {
             // > The content size suggestion is the min-content size in the main axis, clamped, if it has a
             // > preferred aspect ratio, by any definite minimum and maximum cross sizes converted through the
             // > aspect ratio.
+            // For a replaced item, the transferred size is its min-content size. A non-replaced
+            // item's min-content size comes from its contents, which can exceed that size.
+            let min_content_size = if is_replaced {
+                main_content_sizes.min_content
+            } else {
+                main_content_sizes_of_item.min_content
+            };
             let content_size_suggestion = match preferred_aspect_ratio {
-                Some(ratio) => main_content_sizes.min_content.clamp_between_extremums(
+                Some(ratio) => min_content_size.clamp_between_extremums(
                     ratio.compute_dependent_size(main_axis, min_cross_size),
                     max_cross_size.map(|l| ratio.compute_dependent_size(main_axis, l)),
                 ),
-                None => main_content_sizes.min_content,
+                None => min_content_size,
             };
 
             // > The content-based minimum size of a flex item is the smaller of its specified size

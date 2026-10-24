@@ -28,7 +28,7 @@ use crate::fragment_tree::{BoxFragment, CollapsedBlockMargins, CollapsedMargin, 
 use crate::geom::{LogicalRect, LogicalSides1D, LogicalVec2};
 use crate::layout_box_base::LayoutBoxBase;
 use crate::positioned::PositioningContext;
-use crate::sizing::{InlineContentSizesResult, Size};
+use crate::sizing::{self, InlineContentSizesResult, Size};
 use crate::style_ext::LayoutStyle;
 use crate::{ConstraintSpace, ContainingBlock};
 
@@ -72,8 +72,15 @@ impl SameFormattingContextBlock {
         layout_context: &LayoutContext,
         constraint_space: &ConstraintSpace,
     ) -> InlineContentSizesResult {
-        self.base
-            .inline_content_sizes(layout_context, constraint_space, &self.contents)
+        let result =
+            self.base
+                .inline_content_sizes(layout_context, constraint_space, &self.contents);
+        sizing::transfer_inline_content_sizes(
+            result,
+            constraint_space,
+            &self.base.style,
+            self.base.base_fragment_info.flags,
+        )
     }
 
     /// Lay out a normal flow non-replaced [`SameFormattingContextBlock`], properly taking
@@ -167,8 +174,7 @@ impl SameFormattingContextBlock {
         let layout_style = self.contents.layout_style(&self.base);
         let containing_block_writing_mode = containing_block.style.writing_mode;
         let get_inline_content_sizes = |constraint_space: &ConstraintSpace| {
-            self.base
-                .inline_content_sizes(layout_context, constraint_space, &self.contents)
+            self.inline_content_sizes(layout_context, constraint_space)
                 .sizes
         };
         let ContainingBlockPaddingAndBorder {
@@ -178,6 +184,7 @@ impl SameFormattingContextBlock {
             depends_on_block_constraints,
             available_block_size,
             justify_self,
+            transferred_block_size,
             ..
         } = solve_containing_block_padding_and_border_for_in_flow_box(
             containing_block,
@@ -185,6 +192,7 @@ impl SameFormattingContextBlock {
             get_inline_content_sizes,
             ignore_block_margins_for_stretch,
             None,
+            self.base.base_fragment_info.flags,
             has_inline_parent,
         );
         let ResolvedMargins {
@@ -351,7 +359,12 @@ impl SameFormattingContextBlock {
             Size::FitContent,
             Au::zero,
             available_block_size,
-            || content_block_size.into(),
+            || match transferred_block_size {
+                Some(transferred_block_size) => transferred_block_size
+                    .content_size(|| content_block_size)
+                    .into(),
+                None => content_block_size.into(),
+            },
             false, /* is_table */
         );
 
