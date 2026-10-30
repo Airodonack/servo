@@ -732,6 +732,61 @@ impl TransferredSize {
     }
 }
 
+/// The minimum and maximum sizes of a box with a preferred aspect ratio in one axis,
+/// transferred through the ratio from the other axis, where the preferred size is
+/// indefinite.
+///
+/// <https://drafts.csswg.org/css-sizing-4/#aspect-ratio-size-transfers>
+/// > Sizing constraints in either axis (the origin axis) are transferred through the
+/// > preferred aspect ratio and applied to any indefinite minimum, maximum, or preferred
+/// > size in the other axis (the destination axis) as follows:
+/// >
+/// > First, any definite minimum size is converted and transferred from the origin to
+/// > destination axis. This transferred minimum is capped by any definite preferred or
+/// > maximum size in the destination axis.
+/// >
+/// > Then, any definite maximum size is converted and transferred from the origin to
+/// > destination. This transferred maximum is floored by any definite preferred or
+/// > minimum size in the destination axis as well as by the transferred minimum, if any.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TransferredMinMax {
+    min: Au,
+    max: Option<Au>,
+}
+
+impl TransferredMinMax {
+    fn new(ratio: AspectRatio, destination_axis: Direction, min: Au, max: Option<Au>) -> Self {
+        let transfer = |size| ratio.compute_dependent_size(destination_axis, size);
+        Self {
+            min: transfer(min),
+            max: max.map(transfer),
+        }
+    }
+
+    /// The constraints transferred from the given size in the origin axis. A definite size
+    /// there makes the destination axis ratio-dependent instead, with its own size
+    /// transferred, so there is nothing to transfer to the minimum and maximum.
+    pub(crate) fn from_constraint(
+        ratio: Option<AspectRatio>,
+        destination_axis: Direction,
+        origin: SizeConstraint,
+    ) -> Option<Self> {
+        match origin {
+            SizeConstraint::MinMax(min, max) => Some(Self::new(ratio?, destination_axis, min, max)),
+            SizeConstraint::Definite(_) => None,
+        }
+    }
+
+    /// Applies the transferred constraints to an automatic size resolved without them,
+    /// given the resolved minimum and maximum sizes of the destination axis, which win
+    /// over the transferred ones.
+    fn clamp(self, size: Au, min: Au, max: Option<Au>) -> Au {
+        let transferred_min = max.map_or(self.min, |max| self.min.min(max));
+        let transferred_max = self.max.map(|max| max.max(min).max(transferred_min));
+        size.clamp_between_extremums(transferred_min, transferred_max)
+    }
+}
+
 /// Transfers the block constraint of a non-replaced box with a preferred aspect ratio
 /// into its inline content sizes, as [`ReplacedContents`] does with its natural sizes.
 /// A definite block size gives the inline size; otherwise the transferred minimum and
@@ -747,16 +802,18 @@ pub(crate) fn transfer_inline_content_sizes(
     let Some(ratio) = constraint_space.preferred_aspect_ratio else {
         return result;
     };
-    let transfer = |size| ratio.compute_dependent_size(Direction::Inline, size);
     let sizes = match constraint_space.block_size {
         SizeConstraint::Definite(block_size) => {
             TransferredSize::new(ratio, Direction::Inline, block_size, style, fragment_flags)
                 .content_size(|| result.sizes.min_content)
                 .into()
         },
-        SizeConstraint::MinMax(min_size, max_size) => result
-            .sizes
-            .map(|size| size.clamp_between_extremums(transfer(min_size), max_size.map(transfer))),
+        SizeConstraint::MinMax(min_size, max_size) => {
+            let transferred = TransferredMinMax::new(ratio, Direction::Inline, min_size, max_size);
+            result
+                .sizes
+                .map(|size| size.clamp_between_extremums(transferred.min, transferred.max))
+        },
     };
     InlineContentSizesResult {
         sizes,
@@ -816,6 +873,45 @@ impl Sizes {
             is_table,
         );
         preferred.clamp_between_extremums(min, max)
+    }
+
+    /// Like [`Self::resolve`], for a box with a preferred aspect ratio, given the minimum
+    /// and maximum sizes transferred from the other axis. They only apply when the
+    /// preferred size is automatic: a definite preferred size is unaffected by them, and
+    /// the content sizes behind an intrinsic one already account for them.
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn resolve_with_transferred_min_max(
+        &self,
+        axis: Direction,
+        automatic_size: Size<Au>,
+        get_automatic_minimum_size: impl FnOnce() -> Au,
+        stretch_size: Option<Au>,
+        get_content_size: impl FnOnce() -> ContentSizes,
+        is_table: bool,
+        transferred_min_max: Option<TransferredMinMax>,
+    ) -> Au {
+        let transferred_min_max = transferred_min_max.filter(|_| self.preferred.is_initial());
+        let Some(transferred_min_max) = transferred_min_max else {
+            return self.resolve(
+                axis,
+                automatic_size,
+                get_automatic_minimum_size,
+                stretch_size,
+                get_content_size,
+                is_table,
+            );
+        };
+        let (preferred, min, max) = self.resolve_each(
+            automatic_size,
+            get_automatic_minimum_size,
+            stretch_size,
+            get_content_size,
+            is_table,
+        );
+        transferred_min_max
+            .clamp(preferred, min, max)
+            .clamp_between_extremums(min, max)
     }
 
     /// Resolves each of the three sizes into a numerical value, separately.

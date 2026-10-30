@@ -39,7 +39,7 @@ use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBox
 use crate::positioned::{AbsolutelyPositionedBox, PositioningContext, PositioningContextLength};
 use crate::sizing::{
     self, ComputeInlineContentSizes, ContentSizes, InlineContentSizesResult, LazySize, Size,
-    SizeConstraint, Sizes, TransferredSize,
+    SizeConstraint, Sizes, TransferredMinMax, TransferredSize,
 };
 use crate::style_ext::{
     AspectRatio, ComputedValuesExt, ContentBoxSizesAndPBM, LayoutStyle, PaddingBorderMargin,
@@ -265,7 +265,7 @@ impl BlockLevelBox {
             self.inline_content_sizes(layout_context, &constraint_space)
                 .sizes
         };
-        let inline_size = content_box_sizes.inline.resolve(
+        let inline_size = content_box_sizes.inline.resolve_with_transferred_min_max(
             Direction::Inline,
             automatic_inline_size_for_non_replaced(
                 Size::Stretch,
@@ -276,6 +276,11 @@ impl BlockLevelBox {
             Some(available_inline_size),
             get_inline_content_sizes,
             false, /* is_table */
+            TransferredMinMax::from_constraint(
+                preferred_aspect_ratio,
+                Direction::Inline,
+                tentative_block_size,
+            ),
         );
         let tentative_block_size =
             tentative_block_size.or_transferred(preferred_aspect_ratio.map(|ratio| {
@@ -1284,7 +1289,7 @@ impl IndependentFormattingContext {
             if cache.depends_on_stretch_size {
                 update_cache(cache, stretch_size);
             }
-            content_box_sizes.inline.resolve(
+            content_box_sizes.inline.resolve_with_transferred_min_max(
                 Direction::Inline,
                 automatic_inline_size_for_non_replaced(
                     automatic_inline_size,
@@ -1295,6 +1300,11 @@ impl IndependentFormattingContext {
                 Some(stretch_size),
                 || get_inline_content_sizes(cache),
                 is_table,
+                TransferredMinMax::from_constraint(
+                    preferred_aspect_ratio,
+                    Direction::Inline,
+                    cache.tentative_block_size,
+                ),
             )
         };
 
@@ -1646,7 +1656,9 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
         ))
     };
     let justify_self = resolve_justify_self(style, containing_block.style, has_inline_parent);
-    let inline_size = content_box_sizes.inline.resolve(
+    // The minimum and maximum block sizes are transferred through the ratio to an
+    // automatic inline size, so a `max-height` narrows a stretched box.
+    let inline_size = content_box_sizes.inline.resolve_with_transferred_min_max(
         Direction::Inline,
         automatic_inline_size_for_non_replaced(
             automatic_inline_size(justify_self, context),
@@ -1657,6 +1669,11 @@ fn solve_containing_block_padding_and_border_for_in_flow_box<'a>(
         Some(available_inline_size),
         get_inline_content_sizes,
         is_table,
+        TransferredMinMax::from_constraint(
+            preferred_aspect_ratio,
+            Direction::Inline,
+            tentative_block_size,
+        ),
     );
 
     // A block that doesn't establish an independent formatting context gets the block size
