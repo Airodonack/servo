@@ -5,12 +5,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use embedder_traits::UntrustedNodeAddress;
 use euclid::Size2D;
 use fonts::FontContext;
 use layout_api::{
-    AnimatingImages, IFrameSizes, LayoutImageDestination, LayoutNode, PendingImage,
-    PendingImageState, PendingRasterizationImage,
+    AnimatingImages, IFrameSizes, LayoutImageDestination, PendingImage, PendingImageState,
+    PendingRasterizationImage, PendingSVGElementSerialization,
 };
 use net_traits::image_cache::{
     Image as CachedImage, ImageCache, ImageCacheResult, ImageOrMetadataAvailable, PendingImageId,
@@ -18,9 +17,9 @@ use net_traits::image_cache::{
 use net_traits::request::InternalRequest;
 use parking_lot::{Mutex, RwLock};
 use pixels::RasterImage;
-use script::layout_dom::ServoLayoutNode;
 use servo_base::id::PainterId;
 use servo_url::{ImmutableOrigin, ServoUrl};
+use style::color::AbsoluteColor;
 use style::context::SharedStyleContext;
 use style::dom::OpaqueNode;
 use style::values::computed::color::Color;
@@ -121,11 +120,12 @@ pub(crate) struct ImageResolver {
     pub pending_rasterization_images: Mutex<Vec<PendingRasterizationImage>>,
 
     /// A list of `SVGSVGElement`s encountered during layout that are not
-    /// serialized yet. This is needed to support inline SVGs as they are treated
-    /// as replaced elements and the layout is responsible for triggering the
-    /// network load for the corresponding serialized data: urls (similar to
-    /// background images).
-    pub pending_svg_elements_for_serialization: Mutex<Vec<UntrustedNodeAddress>>,
+    /// serialized yet, or were serialized with another computed `color`. This
+    /// is needed to support inline SVGs as they are treated as replaced
+    /// elements and the layout is responsible for triggering the network load
+    /// for the corresponding serialized data: urls (similar to background
+    /// images).
+    pub pending_svg_elements_for_serialization: Mutex<Vec<PendingSVGElementSerialization>>,
 
     /// A shared reference to script's map of DOM nodes with animated images. This is used
     /// to manage image animations in script and inform the script about newly animating
@@ -289,10 +289,19 @@ impl ImageResolver {
         }
     }
 
-    pub(crate) fn queue_svg_element_for_serialization(&self, element: ServoLayoutNode<'_>) {
+    /// Ask script to serialize an `SVGSVGElement` with the given computed `color`, which
+    /// `currentColor` paint inside it resolves to.
+    pub(crate) fn queue_svg_element_for_serialization(
+        &self,
+        element: OpaqueNode,
+        color: AbsoluteColor,
+    ) {
         self.pending_svg_elements_for_serialization
             .lock()
-            .push(element.opaque().into())
+            .push(PendingSVGElementSerialization {
+                node: element.into(),
+                color,
+            })
     }
 
     pub(crate) fn resolve_image<'a>(

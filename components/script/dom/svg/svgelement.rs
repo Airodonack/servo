@@ -118,7 +118,8 @@ impl VirtualMethods for SVGElement {
     fn attribute_affects_presentational_hints(&self, attr: AttrRef<'_>) -> bool {
         matches!(
             attr.local_name(),
-            &local_name!("fill") |
+            &local_name!("color") |
+                &local_name!("fill") |
                 &local_name!("fill-opacity") |
                 &local_name!("fill-rule") |
                 &local_name!("stroke") |
@@ -294,6 +295,14 @@ impl<'dom> LayoutDom<'dom, SVGElement> {
             Default::default(),
         );
 
+        // `color` is a presentation attribute too, and `currentColor` paint resolves to it.
+        // <https://svgwg.org/svg2-draft/styling.html#PresentationAttributes>
+        self.parse_svg_attribute(
+            &parser_context,
+            "color",
+            longhands::color::parse_declared,
+            push,
+        );
         self.parse_svg_attribute(
             &parser_context,
             "fill",

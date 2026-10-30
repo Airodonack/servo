@@ -50,9 +50,10 @@ use js::rust::{
 use layout_api::{
     AccessibilityActionRequest, AxesOverflow, BoxAreaType, CSSPixelRectVec, FragmentType,
     HitTestFlags, LCPCandidate, Layout, LayoutImageDestination, PendingImage, PendingImageState,
-    PendingRasterizationImage, PhysicalSides, QueryMsg, ReflowGoal, ReflowPhasesRun, ReflowRequest,
-    ReflowRequestRestyle, ReflowStatistics, RestyleReason, ScrollContainerQueryFlags,
-    ScrollContainerResponse, TrustedNodeAddress, combine_id_with_fragment_type,
+    PendingRasterizationImage, PendingSVGElementSerialization, PhysicalSides, QueryMsg, ReflowGoal,
+    ReflowPhasesRun, ReflowRequest, ReflowRequestRestyle, ReflowStatistics, RestyleReason,
+    ScrollContainerQueryFlags, ScrollContainerResponse, TrustedNodeAddress,
+    combine_id_with_fragment_type,
 };
 use malloc_size_of::MallocSizeOf;
 use media::WindowGLContext;
@@ -796,6 +797,20 @@ impl Window {
             node.dirty(no_gc, NodeDamage::Other);
         }
         nodes.remove();
+    }
+
+    /// Stop waiting for the rasterizations layout requested for `node`. This is for when its
+    /// images were evicted from the image cache, which drops the listeners that would have
+    /// reported them complete: an entry left here would keep the page from ever being ready
+    /// for a screenshot.
+    pub(crate) fn forget_pending_rasterizations_for_node(&self, node: &Node) {
+        self.pending_images_for_rasterization
+            .borrow_mut()
+            .0
+            .retain(|_, nodes| {
+                nodes.retain(|pending_node| **pending_node != *node);
+                !nodes.is_empty()
+            });
     }
 
     pub(crate) fn pending_image_notification(
@@ -3758,7 +3773,7 @@ impl Window {
         cx: &mut JSContext,
         pending_images: Vec<PendingImage>,
         pending_rasterization_images: Vec<PendingRasterizationImage>,
-        pending_svg_element_for_serialization: Vec<UntrustedNodeAddress>,
+        pending_svg_element_for_serialization: Vec<PendingSVGElementSerialization>,
     ) {
         let pipeline_id = self.pipeline_id();
         let image_cache = self.image_cache();
@@ -3820,11 +3835,12 @@ impl Window {
             }
         }
 
-        for node in pending_svg_element_for_serialization.into_iter() {
-            let node = unsafe { from_untrusted_node_address(node) };
+        for pending in pending_svg_element_for_serialization.into_iter() {
+            let node = unsafe { from_untrusted_node_address(pending.node) };
             let svg = node.downcast::<SVGSVGElement>().unwrap();
-            svg.serialize_and_cache_subtree(cx);
-            node.dirty(cx.no_gc(), NodeDamage::Other);
+            if svg.serialize_and_cache_subtree(cx, pending.color) {
+                node.dirty(cx.no_gc(), NodeDamage::Other);
+            }
         }
     }
 
