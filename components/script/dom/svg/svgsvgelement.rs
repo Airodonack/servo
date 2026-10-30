@@ -12,10 +12,11 @@ use js::rust::HandleObject;
 use layout_api::SVGElementData;
 use servo_url::ServoUrl;
 use style::attr::AttrValue;
+use style::color::AbsoluteColor;
 use style::parser::ParserContext;
 use style::stylesheets::Origin;
 use style::values::specified::LengthPercentage;
-use style_traits::ParsingMode;
+use style_traits::{ParsingMode, ToCss};
 use uuid::Uuid;
 use xml5ever::serialize::TraversalScope;
 
@@ -44,6 +45,10 @@ pub(crate) struct SVGSVGElement {
     // on each layout and must be invalidated when the subtree changes.
     #[no_trace]
     cached_serialized_data_url: AtomicRefCell<Option<Result<ServoUrl, ()>>>,
+    // The computed `color` the cached serialization was made with: `currentColor`
+    // paint inside the SVG resolves to it, so a change of `color` makes it stale.
+    #[no_trace]
+    serialized_color: AtomicRefCell<Option<AbsoluteColor>>,
 }
 
 impl SVGSVGElement {
@@ -56,6 +61,7 @@ impl SVGSVGElement {
             svggraphicselement: SVGGraphicsElement::new_inherited(local_name, prefix, document),
             uuid: Uuid::new_v4(),
             cached_serialized_data_url: Default::default(),
+            serialized_color: Default::default(),
         }
     }
 
@@ -75,7 +81,23 @@ impl SVGSVGElement {
         )
     }
 
-    pub(crate) fn serialize_and_cache_subtree(&self, cx: &mut js::context::JSContext) {
+    /// Serialize the subtree into a `data:` url for layout to draw, with `color` (the
+    /// element's computed `color`) on its root, unless the cached serialization was already
+    /// made with it. Returns whether the cache changed.
+    pub(crate) fn serialize_and_cache_subtree(
+        &self,
+        cx: &mut js::context::JSContext,
+        color: AbsoluteColor,
+    ) -> bool {
+        if self.cached_serialized_data_url.borrow().is_some() {
+            if *self.serialized_color.borrow() == Some(color) {
+                return false;
+            }
+            // The serialization and its images were made with another `color`.
+            self.invalidate_cached_serialized_subtree_and_rasterization_result(cx.no_gc());
+        }
+        *self.serialized_color.borrow_mut() = Some(color);
+
         let document_fragment = self.owner_document().CreateDocumentFragment(cx);
         let cloned_node = Node::clone(
             cx,
@@ -91,14 +113,29 @@ impl SVGSVGElement {
         {
             error!("Unable to clone SVG tree");
             *self.cached_serialized_data_url.borrow_mut() = Some(Err(()));
-            return;
+            return true;
         }
 
         self.process_use_elements(cx, &cloned_node);
 
+        // `currentColor` paint resolves to the computed `color` of the element it is used
+        // on, and the root inherits that from the HTML around it, which the serialized
+        // document no longer has. The renderer reads `currentColor` from the nearest `color`
+        // attribute, so the root carries the computed value; a `color` set on an element
+        // inside the SVG still overrides it there.
+        // <https://drafts.csswg.org/css-color-4/#currentcolor-color>
+        cloned_node
+            .downcast::<Element>()
+            .unwrap()
+            .set_string_attribute(
+                cx,
+                &local_name!("color"),
+                DOMString::from(color.into_srgb_legacy().to_css_string()),
+            );
+
         let Ok(xml_source) = cloned_node.xml_serialize(TraversalScope::IncludeNode) else {
             *self.cached_serialized_data_url.borrow_mut() = Some(Err(()));
-            return;
+            return true;
         };
 
         let xml_source: String = xml_source.into();
@@ -108,6 +145,7 @@ impl SVGSVGElement {
             Ok(url) => *self.cached_serialized_data_url.borrow_mut() = Some(Ok(url)),
             Err(error) => error!("Unable to parse serialized SVG data url: {error}"),
         };
+        true
     }
 
     fn process_use_elements(&self, cx: &mut JSContext, root_node: &Node) {
@@ -168,6 +206,7 @@ impl SVGSVGElement {
         owner_window
             .image_cache()
             .evict_rasterized_image(&self.uuid);
+        owner_window.forget_pending_rasterizations_for_node(self.upcast());
         if let Some(Ok(url)) = &*self.cached_serialized_data_url.borrow() {
             owner_window.layout_mut().remove_cached_image(url);
             owner_window.image_cache().evict_completed_image(
@@ -178,6 +217,7 @@ impl SVGSVGElement {
         }
 
         *self.cached_serialized_data_url.borrow_mut() = None;
+        *self.serialized_color.borrow_mut() = None;
         self.upcast::<Node>().dirty(no_gc, NodeDamage::Other);
     }
 }
@@ -199,6 +239,7 @@ impl<'dom> LayoutDom<'dom, SVGSVGElement> {
             height,
             view_box,
             svg_id,
+            serialized_color: *self.unsafe_get().serialized_color.borrow(),
         }
     }
 }

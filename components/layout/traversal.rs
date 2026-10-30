@@ -204,6 +204,22 @@ pub(crate) fn compute_damage_and_rebuild_box_tree_below_dirty_root<'dom>(
         return element_damage | damage_from_parent;
     }
 
+    // An inline SVG is drawn from a serialization that carries its computed `color`, which
+    // `currentColor` paint resolves to. A change of `color` alone is only repaint damage and
+    // keeps the box with its old image, so ask script for a new serialization here; script
+    // damages the element once it has made it, and the box is rebuilt with the new image.
+    if !element_damage.is_empty() &&
+        let Some(svg_data) = node.as_svg() &&
+        let Some(serialized_color) = svg_data.serialized_color
+    {
+        let color = node.style(&layout_context.style_context).slow_clone_color();
+        if color != serialized_color {
+            layout_context
+                .image_resolver
+                .queue_svg_element_for_serialization(node.opaque(), color);
+        }
+    }
+
     let mut damage_set = ElementDamageSet {
         node,
         from_parent: damage_from_parent,
