@@ -295,19 +295,22 @@ impl ReplacedContents {
             ratio,
         };
 
-        let svg_source = match svg_data.source {
-            None => {
-                // The SVGSVGElement is not yet serialized, so we add it to a list
-                // and hand it over to script to peform the serialization.
-                context
-                    .image_resolver
-                    .queue_svg_element_for_serialization(node);
-                None
-            },
-            // If `svg_source_result` is `Err()`, it means that the previous attempt
-            // had errored, then don't attempt to serialize again.
-            Some(svg_source_result) => svg_source_result.ok(),
-        };
+        // `currentColor` paint inside the SVG resolves to the element's computed `color`,
+        // which script writes into the serialization.
+        // <https://svgwg.org/svg2-draft/painting.html#SpecifyingPaint>
+        let color = parent_style.slow_clone_color();
+        if svg_data.source.is_none() || svg_data.serialized_color != Some(color) {
+            // The SVGSVGElement is not yet serialized, or was serialized with another
+            // `color`, so we add it to a list and hand it over to script to peform the
+            // serialization. A stale serialization is still drawn until then.
+            context
+                .image_resolver
+                .queue_svg_element_for_serialization(node.opaque(), color);
+        }
+
+        // If the source is `Err()`, it means that the previous attempt had errored, and
+        // script doesn't attempt to serialize again unless the `color` changes.
+        let svg_source = svg_data.source.and_then(Result::ok);
 
         let cached_image = svg_source.and_then(|svg_source| {
             context

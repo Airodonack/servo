@@ -68,6 +68,7 @@ use servo_url::{ImmutableOrigin, ServoUrl};
 use style::Atom;
 use style::animation::DocumentAnimationSet;
 use style::attr::{AttrValue, parse_double};
+use style::color::AbsoluteColor;
 use style::context::QuirksMode;
 use style::data::ElementDataWrapper;
 use style::device::Device;
@@ -174,6 +175,9 @@ pub struct SVGElementData<'dom> {
     pub svg_id: Uuid,
     /// <https://www.w3.org/TR/SVG11/coords.html#ViewBoxAttribute>
     pub view_box: Option<&'dom AttrValue>,
+    /// The computed `color` that `source` was serialized with, which is what `currentColor`
+    /// paint inside the SVG resolves to.
+    pub serialized_color: Option<AbsoluteColor>,
 }
 
 impl SVGElementData<'_> {
@@ -662,6 +666,15 @@ impl RestyleReason {
     }
 }
 
+/// An `SVGSVGElement` that layout found without a serialization made with its current
+/// computed `color`.
+pub struct PendingSVGElementSerialization {
+    pub node: UntrustedNodeAddress,
+    /// The element's computed `color`, which `currentColor` paint inside the SVG resolves to.
+    /// The serialization carries it on its root element, where the SVG renderer finds it.
+    pub color: AbsoluteColor,
+}
+
 /// Information derived from a layout pass that needs to be returned to the script thread.
 #[derive(Default)]
 pub struct ReflowResult {
@@ -675,7 +688,7 @@ pub struct ReflowResult {
     /// The list of `SVGSVGElement`s encountered in the DOM that need to be serialized.
     /// This is needed to support inline SVGs as the serialization needs to happen on
     /// the script thread.
-    pub pending_svg_elements_for_serialization: Vec<UntrustedNodeAddress>,
+    pub pending_svg_elements_for_serialization: Vec<PendingSVGElementSerialization>,
     /// The list of iframes in this layout and their sizes, used in order
     /// to communicate them with the Constellation and also the `Window`
     /// element of their content pages. Returning None if incremental reflow
