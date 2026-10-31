@@ -45,6 +45,8 @@ pub fn set(preferences: Preferences) {
     // otherwise skip them whenever the preferences are the defaults (as they are at startup).
     // <https://drafts.csswg.org/css-scrollbars-1/>
     stylo_static_prefs::set_pref!("layout.css.scrollbar-styling.enabled", true);
+    // <https://drafts.csswg.org/css-overflow-3/#text-overflow>
+    stylo_static_prefs::set_pref!("layout.css.text-overflow.enabled", true);
 
     // Get list of changes, returning early if the preferences haven't changed.
     let changed = preferences.diff(&PREFERENCES.read().unwrap());

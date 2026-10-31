@@ -263,9 +263,36 @@ pub(super) struct LineItemLayout<'layout_data, 'layout> {
 
     /// Whether this line contains only a block-level box.
     for_block_level: bool,
+
+    /// The `text-overflow` ellipsis to place on this line, if its content overflows the
+    /// line box and the block container asks for one.
+    ellipsis: Option<LineEllipsis>,
+
+    /// Whether content has been hidden on this line to make room for the ellipsis. Once
+    /// that happens, all of the content after it on the line is hidden too.
+    ellipsis_truncated_content: bool,
+
+    /// Whether any text or atomic inline has been placed on this line while making room
+    /// for an ellipsis. The first one is clipped rather than hidden.
+    ellipsis_placed_content: bool,
+
+    /// The inline position, relative to the start of the line's containing block, of the
+    /// end of the content that remains visible next to the ellipsis.
+    ellipsis_inline_position: Au,
+}
+
+/// The ellipsis that `text-overflow` places at the end of a line whose content overflows
+/// the line box: <https://drafts.csswg.org/css-overflow-4/#text-overflow>.
+pub(super) struct LineEllipsis {
+    /// The inline position, relative to the start of the line's containing block, at which
+    /// visible content must end so that the ellipsis fits before the end of the line box.
+    pub cutoff: Au,
+    /// The shaped ellipsis string, styled as the block container.
+    pub text: TextRunLineItem,
 }
 
 impl LineItemLayout<'_, '_> {
+    #[expect(clippy::too_many_arguments)]
     pub(super) fn layout_line_items(
         layout: &mut InlineFormattingContextLayout,
         line_items: Vec<LineItem>,
@@ -274,6 +301,7 @@ impl LineItemLayout<'_, '_> {
         justification_adjustment: Au,
         is_phantom_line: bool,
         for_block_level: bool,
+        ellipsis: Option<LineEllipsis>,
     ) -> Vec<Fragment> {
         let baseline_offset = effective_block_advance.find_baseline_offset();
         LineItemLayout {
@@ -291,6 +319,10 @@ impl LineItemLayout<'_, '_> {
             justification_adjustment,
             is_phantom_line,
             for_block_level,
+            ellipsis,
+            ellipsis_truncated_content: false,
+            ellipsis_placed_content: false,
+            ellipsis_inline_position: start_position.inline,
         }
         .layout(line_items)
     }
@@ -415,6 +447,15 @@ impl LineItemLayout<'_, '_> {
 
         // Move back to the root of the inline box tree, so that all boxes are ended.
         self.prepare_layout_for_inline_box(None);
+
+        // > Implementations must hide characters and atomic inline-level elements at the end
+        // > edge of the line as necessary to fit the ellipsis, and place the ellipsis
+        // > immediately adjacent to the end edge of the remaining inline content.
+        // <https://drafts.csswg.org/css-overflow-4/#text-overflow>
+        if let Some(ellipsis) = self.ellipsis.take() {
+            self.current_state.inline_advance = self.ellipsis_inline_position;
+            self.layout_text_run(ellipsis.text);
+        }
 
         FragmentAndData::resolve_physical_rects_and_adjust_floats(
             std::mem::take(&mut self.current_state.fragments_and_data),
@@ -657,7 +698,90 @@ impl LineItemLayout<'_, '_> {
         }
     }
 
-    fn layout_text_run(&mut self, text_item: TextRunLineItem) {
+    /// The current inline position on the line, relative to the start of the line's
+    /// containing block, including the inline-start padding, border and margin of the
+    /// inline boxes that are open (which are only added to their parents once they end).
+    fn inline_position_in_line(&self) -> Au {
+        let mut position =
+            self.current_state.parent_offset.inline + self.current_state.inline_advance;
+        for state in self
+            .state_stack
+            .iter()
+            .chain(std::iter::once(&self.current_state))
+        {
+            let Some(identifier) = state.identifier else {
+                continue;
+            };
+            let inline_box_state =
+                &*self.layout.inline_box_states[identifier.index_in_inline_boxes as usize];
+            if inline_box_state.should_clone_pbm() ||
+                state
+                    .flags
+                    .contains(LineLayoutInlineContainerFlags::HAD_INLINE_START_PBM)
+            {
+                let pbm = &inline_box_state.pbm;
+                position += pbm.padding.inline_start +
+                    pbm.border.inline_start +
+                    pbm.margin.inline_start.auto_is(Au::zero);
+            }
+        }
+        position
+    }
+
+    /// Remove from `text_item` the glyphs that do not fit before the ellipsis `cutoff`, and
+    /// return the inline size of what remains.
+    fn truncate_text_run_for_ellipsis(
+        &mut self,
+        text_item: &mut TextRunLineItem,
+        cutoff: Au,
+    ) -> Au {
+        if self.ellipsis_truncated_content {
+            text_item.text.clear();
+            text_item.character_range_in_dom_node.end = text_item.character_range_in_dom_node.start;
+            return Au::zero();
+        }
+
+        let start = self.inline_position_in_line();
+        let available = cutoff - start;
+        let mut kept_advance = Au::zero();
+        let mut kept_characters = Utf32CodeUnits(0);
+        let mut kept_slices = Vec::with_capacity(text_item.text.len());
+        for slice in text_item.text.drain(..) {
+            let advance = slice.total_advance() +
+                self.justification_adjustment
+                    .scale_by(slice.total_word_separators() as f32);
+            if kept_advance + advance <= available {
+                kept_advance += advance;
+                kept_characters += slice.character_count();
+                kept_slices.push(slice);
+                continue;
+            }
+
+            self.ellipsis_truncated_content = true;
+            let keep_first_cluster = !self.ellipsis_placed_content && kept_slices.is_empty();
+            if let Some((leading_part, advance)) = slice.leading_part_fitting_in(
+                available - kept_advance,
+                self.justification_adjustment,
+                keep_first_cluster,
+            ) {
+                kept_advance += advance;
+                kept_characters += leading_part.character_count();
+                kept_slices.push(leading_part);
+            }
+            break;
+        }
+
+        text_item.text = kept_slices;
+        text_item.character_range_in_dom_node.end =
+            text_item.character_range_in_dom_node.start + kept_characters;
+        if !text_item.text.is_empty() {
+            self.ellipsis_placed_content = true;
+            self.ellipsis_inline_position = start + kept_advance;
+        }
+        kept_advance
+    }
+
+    fn layout_text_run(&mut self, mut text_item: TextRunLineItem) {
         if text_item.text.is_empty() && !text_item.is_empty_for_text_cursor {
             return;
         }
@@ -681,14 +805,15 @@ impl LineItemLayout<'_, '_> {
         // The block start of the TextRun is often zero (meaning it has the same font metrics as the
         // inline box's strut), but for children of the inline formatting context root or for
         // fallback fonts that use baseline relative alignment, it might be different.
-        let font_metrics = text_item.info.font_info.font.metrics();
+        let font = text_item.info.font_info.font.clone();
+        let font_metrics = font.metrics();
         let start_corner = LogicalVec2 {
             inline: self.current_state.inline_advance,
             block: self.current_state.baseline_offset -
                 font_metrics.ascent -
                 self.current_state.parent_offset.block,
         };
-        let content_rect = LogicalRect {
+        let mut content_rect = LogicalRect {
             start_corner,
             size: LogicalVec2 {
                 block: font_metrics.line_gap,
@@ -696,12 +821,55 @@ impl LineItemLayout<'_, '_> {
             },
         };
 
-        let font_key = text_item.info.font_info.font.key(
+        let font_key = font.key(
             self.layout.layout_context.painter_id,
             &self.layout.layout_context.font_context,
         );
 
+        // Text hidden to make room for a `text-overflow` ellipsis keeps a fragment without
+        // glyphs, so that it still takes its room on the line and in the scrollable overflow.
+        let ellipsis_cutoff = self.ellipsis.as_ref().map(|ellipsis| ellipsis.cutoff);
+        if let Some(cutoff) = ellipsis_cutoff.filter(|_| !text_item.text.is_empty()) {
+            let visible_inline_size = self.truncate_text_run_for_ellipsis(&mut text_item, cutoff);
+            let hidden_rect = LogicalRect {
+                start_corner: LogicalVec2 {
+                    inline: start_corner.inline + visible_inline_size,
+                    block: start_corner.block,
+                },
+                size: LogicalVec2 {
+                    block: font_metrics.line_gap,
+                    inline: inline_advance - visible_inline_size,
+                },
+            };
+            if !hidden_rect.size.inline.is_zero() {
+                let character_range = text_item.character_range_in_dom_node.end..
+                    text_item.character_range_in_dom_node.end;
+                self.current_state
+                    .fragments_and_data
+                    .push(FragmentAndData::new(
+                        Fragment::Text(Arc::new(TextFragment {
+                            base: BaseFragment::new(
+                                text_item.base_fragment_info,
+                                PhysicalRect::zero(),
+                            ),
+                            run_data: text_item.text_fragment_run_data.clone(),
+                            font_metrics: font_metrics.clone(),
+                            font_key,
+                            glyphs: Vec::new(),
+                            justification_adjustment: self.justification_adjustment,
+                            character_range_in_dom_node: character_range,
+                            is_empty_for_text_cursor: false,
+                        })),
+                        hidden_rect,
+                    ));
+            }
+            content_rect.size.inline = visible_inline_size;
+        }
+
         self.current_state.inline_advance += inline_advance;
+        if text_item.text.is_empty() && !text_item.is_empty_for_text_cursor {
+            return;
+        }
         self.current_state
             .fragments_and_data
             .push(FragmentAndData::new(
@@ -719,7 +887,28 @@ impl LineItemLayout<'_, '_> {
             ));
     }
 
+    /// When this line has an ellipsis, whether an atomic inline of the given inline size
+    /// placed at the current position must be hidden to make room for it.
+    fn hide_atomic_for_ellipsis(&mut self, inline_size: Au) -> bool {
+        let Some(cutoff) = self.ellipsis.as_ref().map(|ellipsis| ellipsis.cutoff) else {
+            return false;
+        };
+        if self.ellipsis_truncated_content {
+            return true;
+        }
+        let start = self.inline_position_in_line();
+        if start + inline_size > cutoff && self.ellipsis_placed_content {
+            self.ellipsis_truncated_content = true;
+            return true;
+        }
+        self.ellipsis_placed_content = true;
+        self.ellipsis_inline_position = start + inline_size;
+        false
+    }
+
     fn layout_atomic(&mut self, atomic: AtomicLineItem) {
+        let hidden_by_ellipsis = self.hide_atomic_for_ellipsis(atomic.size.inline);
+
         // The initial `start_corner` of the Fragment is only the PaddingBorderMargin sum start
         // offset, which is the sum of the start component of the padding, border, and margin.
         // This needs to be added to the calculated block and inline positions.
@@ -768,6 +957,50 @@ impl LineItemLayout<'_, '_> {
         }
 
         self.current_state.inline_advance += atomic.size.inline;
+
+        // An atomic inline hidden to make room for a `text-overflow` ellipsis is replaced by
+        // an empty text fragment covering its border box, so that it is not painted but still
+        // contributes to the scrollable overflow. Line boxes only hold text and box fragments.
+        if hidden_by_ellipsis {
+            let Some(ellipsis) = self.ellipsis.as_ref() else {
+                return;
+            };
+            let padding_border = (atomic.fragment.padding +
+                atomic.fragment.border +
+                atomic.fragment.scrollbar_gutter)
+                .to_logical(ifc_writing_mode);
+            let border_rect = LogicalRect {
+                start_corner: LogicalVec2 {
+                    inline: content_rect.start_corner.inline - padding_border.inline_start,
+                    block: content_rect.start_corner.block - padding_border.block_start,
+                },
+                size: LogicalVec2 {
+                    inline: content_rect.size.inline + padding_border.inline_sum(),
+                    block: content_rect.size.block + padding_border.block_sum(),
+                },
+            };
+            let font = &ellipsis.text.info.font_info.font;
+            let fragment = TextFragment {
+                base: BaseFragment::new(BaseFragmentInfo::anonymous(), PhysicalRect::zero()),
+                run_data: ellipsis.text.text_fragment_run_data.clone(),
+                font_metrics: font.metrics().clone(),
+                font_key: font.key(
+                    self.layout.layout_context.painter_id,
+                    &self.layout.layout_context.font_context,
+                ),
+                glyphs: Vec::new(),
+                justification_adjustment: Au::zero(),
+                character_range_in_dom_node: ellipsis.text.character_range_in_dom_node.clone(),
+                is_empty_for_text_cursor: false,
+            };
+            self.current_state
+                .fragments_and_data
+                .push(FragmentAndData::new(
+                    Fragment::Text(Arc::new(fragment)),
+                    border_rect,
+                ));
+            return;
+        }
 
         self.current_state
             .fragments_and_data
