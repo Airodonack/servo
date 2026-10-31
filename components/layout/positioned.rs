@@ -518,6 +518,9 @@ impl HoistedAbsolutelyPositionedBox {
         hoisted_absolutes_from_children.extend(positioning_context.absolutes);
 
         let fragment = Fragment::Box(box_fragment);
+        independent_formatting_context
+            .base
+            .update_overflowing_auto_axes(layout_context, &fragment);
         self.fragment.borrow_mut().fragment = Some(fragment.clone());
 
         let fragment = match is_layout_root {
@@ -769,7 +772,8 @@ impl IndependentFormattingContext {
             pbm.border.to_physical(containing_block_writing_mode),
             margin.to_physical(containing_block_writing_mode),
             specific_layout_info,
-        );
+        )
+        .with_scrollbar_gutter(self.base.scrollbar_gutter());
 
         // This is an absolutely positioned element, which means it also establishes a
         // containing block for absolutes. We lay out any absolutely positioned children

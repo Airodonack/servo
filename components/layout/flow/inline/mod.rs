@@ -2966,7 +2966,10 @@ impl IndependentFormattingContext {
         );
 
         let fragment = Arc::new(fragment);
-        self.base.set_fragment(Fragment::Box(fragment.clone()));
+        let fragment_for_base = Fragment::Box(fragment.clone());
+        self.base
+            .update_overflowing_auto_axes(layout.layout_context, &fragment_for_base);
+        self.base.set_fragment(fragment_for_base);
 
         layout.push_line_item_to_unbreakable_segment(LineItem::Atomic(
             layout.current_inline_box_identifier(),
@@ -3050,9 +3053,11 @@ impl FloatBox {
         ));
         let new_len = layout.positioning_context.len();
 
+        let fragment_for_base = Fragment::Box(fragment.clone());
         self.contents
             .base
-            .set_fragment(Fragment::Box(fragment.clone()));
+            .update_overflowing_auto_axes(layout.layout_context, &fragment_for_base);
+        self.contents.base.set_fragment(fragment_for_base);
         layout.push_line_item_to_unbreakable_segment(LineItem::Float(
             layout.current_inline_box_identifier(),
             FloatLineItem {
