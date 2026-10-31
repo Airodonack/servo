@@ -29,6 +29,7 @@ mod positioned;
 mod query;
 mod quotes;
 mod replaced;
+mod scrollbars;
 mod selection;
 mod sizing;
 mod style_ext;
