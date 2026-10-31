@@ -19,10 +19,12 @@ use servo_base::id::{ContainerTimingID, LCPCandidateID, ScrollTreeNodeId};
 use servo_base::print_tree::PrintTree;
 use servo_geometry::FastLayoutTransform;
 use style::values::specified::Overflow;
-use webrender_api::units::{LayoutPixel, LayoutPoint, LayoutRect, LayoutSize, LayoutVector2D};
+use webrender_api::units::{
+    LayoutPixel, LayoutPoint, LayoutRect, LayoutSize, LayoutTransform, LayoutVector2D,
+};
 use webrender_api::{
-    ColorF, ExternalScrollId, PipelineId, PropertyBindingKey, ReferenceFrameKind, ScrollLocation,
-    SpatialId, StickyOffsetBounds, TransformStyle,
+    ColorF, ExternalScrollId, PipelineId, PropertyBindingKey, PropertyValue, ReferenceFrameKind,
+    ScrollLocation, SpatialId, StickyOffsetBounds, TransformStyle,
 };
 
 /// A scroll type, describing whether what kind of action originated this scroll request.
@@ -249,6 +251,47 @@ pub struct ScrollableNodeInfo {
     /// Whether or not the scroll offset of this node has changed and it needs it's
     /// cached transformations invalidated.
     pub offset_changed: Cell<bool>,
+
+    /// The thumbs of the classic scrollbars that layout drew for this node.
+    pub scrollbar_thumbs: ScrollbarThumbs,
+}
+
+/// The thumb of a classic scrollbar that layout drew for a scroll node. Layout draws it
+/// in a reference frame whose transform is bound to `transform_key`; `Paint` sets that
+/// transform as the node scrolls, so the thumb follows scrolling that does not go
+/// through layout (wheel, touch and keyboard scrolling).
+#[derive(Clone, Copy, Debug, Deserialize, MallocSizeOf, PartialEq, Serialize)]
+pub struct ScrollbarThumb {
+    /// The id of the WebRender `PropertyBindingKey<LayoutTransform>` of the thumb.
+    pub transform_key: u64,
+    /// How far the thumb moves along its track from the start to the end of the
+    /// scroll range.
+    pub travel: f32,
+}
+
+impl ScrollbarThumb {
+    /// The transform that places this thumb for a scroll `offset` out of `range`.
+    fn transform(&self, offset: f32, range: f32, vertical: bool) -> PropertyValue<LayoutTransform> {
+        let fraction = if range > 0.0 {
+            (offset / range).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let distance = self.travel * fraction;
+        let (x, y) = if vertical {
+            (0.0, distance)
+        } else {
+            (distance, 0.0)
+        };
+        PropertyBindingKey::new(self.transform_key).with(LayoutTransform::translation(x, y, 0.0))
+    }
+}
+
+/// The classic scrollbar thumbs of a scroll node, if layout drew any.
+#[derive(Clone, Copy, Debug, Default, Deserialize, MallocSizeOf, PartialEq, Serialize)]
+pub struct ScrollbarThumbs {
+    pub vertical: Option<ScrollbarThumb>,
+    pub horizontal: Option<ScrollbarThumb>,
 }
 
 impl ScrollableNodeInfo {
@@ -325,6 +368,33 @@ impl ScrollableNodeInfo {
 impl ScrollableNodeInfo {
     fn scrollable_size(&self) -> LayoutSize {
         self.content_rect.size() - self.clip_rect.size()
+    }
+
+    /// The transform that places the vertical or horizontal scrollbar thumb of this node
+    /// for its current scroll offset, if it has one.
+    pub fn scrollbar_thumb_transform(
+        &self,
+        vertical: bool,
+    ) -> Option<PropertyValue<LayoutTransform>> {
+        let range = self.scrollable_size();
+        if vertical {
+            self.scrollbar_thumbs
+                .vertical
+                .map(|thumb| thumb.transform(self.offset.y, range.height, true))
+        } else {
+            self.scrollbar_thumbs
+                .horizontal
+                .map(|thumb| thumb.transform(self.offset.x, range.width, false))
+        }
+    }
+
+    /// The transforms that place the scrollbar thumbs of this node for its current
+    /// scroll offset.
+    pub fn scrollbar_thumb_transforms(&self) -> Vec<PropertyValue<LayoutTransform>> {
+        [true, false]
+            .into_iter()
+            .filter_map(|vertical| self.scrollbar_thumb_transform(vertical))
+            .collect()
     }
 }
 
@@ -1098,6 +1168,7 @@ impl PaintDisplayListInfo {
                 touch_action: TouchAction::Auto,
                 offset: LayoutVector2D::zero(),
                 offset_changed: Cell::new(false),
+                scrollbar_thumbs: Default::default(),
             }),
         );
 

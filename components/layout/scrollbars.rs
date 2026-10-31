@@ -13,6 +13,8 @@
 //! > Any space taken up by the scrollbars should be taken out of (subtracted from the
 //! > dimensions of) the containing block formed by the element with the scrollbars.
 
+use std::hash::{DefaultHasher, Hash, Hasher};
+
 use app_units::Au;
 use bitflags::bitflags;
 use style::Zero;
@@ -21,9 +23,10 @@ use style::computed_values::scrollbar_width::T as ScrollbarWidth;
 use style::properties::ComputedValues;
 use style::values::computed::ScrollbarGutter;
 use style::values::specified::Overflow;
+use webrender_api as wr;
 
-use crate::fragment_tree::FragmentFlags;
-use crate::geom::PhysicalSides;
+use crate::fragment_tree::{BoxFragmentWithStyle, FragmentFlags};
+use crate::geom::{PhysicalPoint, PhysicalRect, PhysicalSides, PhysicalSize};
 use crate::style_ext::ComputedValuesExt;
 
 /// The thickness of a classic scrollbar for `scrollbar-width: auto`, in CSS pixels. This
@@ -34,6 +37,9 @@ const AUTO_SCROLLBAR_THICKNESS_PX: i32 = 15;
 /// The thickness of a classic scrollbar for `scrollbar-width: thin`, in CSS pixels, again
 /// matching Chromium.
 const THIN_SCROLLBAR_THICKNESS_PX: i32 = 10;
+
+/// The space between a scrollbar thumb and the long edges of its track, in CSS pixels.
+const THUMB_INSET_PX: i32 = 2;
 
 bitflags! {
     /// The physical scrollbars of a scroll container.
@@ -156,4 +162,150 @@ pub(crate) fn scrollbar_gutter(
         }
     }
     gutter
+}
+
+/// One classic scrollbar of a scroll container, as painted: its track and its thumb at the
+/// start of the track. The painter moves the thumb along the track by up to `travel` as
+/// the container scrolls.
+pub(crate) struct ScrollbarParts {
+    pub vertical: bool,
+    pub track: PhysicalRect<Au>,
+    /// The thumb, absent when there is nothing to scroll (`overflow: scroll` with
+    /// content that fits).
+    pub thumb: Option<PhysicalRect<Au>>,
+    pub travel: Au,
+}
+
+/// The classic scrollbars of a scroll container fragment, in the coordinates of its
+/// containing block offset by `origin`, and the corner where they meet. A scrollbar is
+/// painted in its gutter when it is shown (`overflow: scroll`, or `overflow: auto` with
+/// content that overflows in that axis).
+pub(crate) fn scrollbar_parts(
+    fragment: &BoxFragmentWithStyle<'_>,
+    origin: PhysicalPoint<Au>,
+) -> (Vec<ScrollbarParts>, Option<PhysicalRect<Au>>) {
+    let style = fragment.style();
+    let gutter = fragment.scrollbar_gutter;
+    let thickness = scrollbar_thickness(style);
+    if thickness.is_zero() || gutter == PhysicalSides::zero() {
+        return (Vec::new(), None);
+    }
+
+    let scrollport = fragment.padding_rect().translate(origin.to_vector());
+    let scrollable_overflow = fragment.scrollable_overflow();
+    let overflowing_axes = {
+        let mut axes = ScrollbarAxes::empty();
+        axes.set(
+            ScrollbarAxes::VERTICAL,
+            scrollable_overflow.size.height > scrollport.size.height,
+        );
+        axes.set(
+            ScrollbarAxes::HORIZONTAL,
+            scrollable_overflow.size.width > scrollport.size.width,
+        );
+        axes
+    };
+    let shown = scrollbars_shown(style, fragment.base.flags, overflowing_axes);
+
+    let vertical_gutter = if vertical_scrollbar_on_left(style) {
+        gutter.left
+    } else {
+        gutter.right
+    };
+    let inset = Au::from_px(THUMB_INSET_PX);
+    let mut parts = Vec::new();
+
+    let vertical = shown.contains(ScrollbarAxes::VERTICAL) && vertical_gutter >= thickness;
+    if vertical {
+        let x = if vertical_scrollbar_on_left(style) {
+            scrollport.min_x() - thickness
+        } else {
+            scrollport.max_x()
+        };
+        let track = PhysicalRect::new(
+            PhysicalPoint::new(x, scrollport.min_y()),
+            PhysicalSize::new(thickness, scrollport.size.height),
+        );
+        let (thumb_length, travel) = thumb_length_and_travel(
+            track.size.height,
+            scrollport.size.height,
+            scrollable_overflow.size.height,
+            thickness,
+        );
+        let thumb = overflowing_axes.contains(ScrollbarAxes::VERTICAL).then(|| {
+            PhysicalRect::new(track.origin, PhysicalSize::new(thickness, thumb_length))
+                .inflate(-inset, -inset)
+        });
+        parts.push(ScrollbarParts {
+            vertical: true,
+            track,
+            thumb,
+            travel,
+        });
+    }
+
+    let horizontal = shown.contains(ScrollbarAxes::HORIZONTAL) && gutter.bottom >= thickness;
+    if horizontal {
+        let track = PhysicalRect::new(
+            PhysicalPoint::new(scrollport.min_x(), scrollport.max_y()),
+            PhysicalSize::new(scrollport.size.width, thickness),
+        );
+        let (thumb_length, travel) = thumb_length_and_travel(
+            track.size.width,
+            scrollport.size.width,
+            scrollable_overflow.size.width,
+            thickness,
+        );
+        let thumb = overflowing_axes
+            .contains(ScrollbarAxes::HORIZONTAL)
+            .then(|| {
+                PhysicalRect::new(track.origin, PhysicalSize::new(thumb_length, thickness))
+                    .inflate(-inset, -inset)
+            });
+        parts.push(ScrollbarParts {
+            vertical: false,
+            track,
+            thumb,
+            travel,
+        });
+    }
+
+    let corner = (vertical && horizontal).then(|| {
+        let vertical_track = parts[0].track;
+        PhysicalRect::new(
+            PhysicalPoint::new(vertical_track.min_x(), scrollport.max_y()),
+            PhysicalSize::new(thickness, thickness),
+        )
+    });
+    (parts, corner)
+}
+
+/// The length of a thumb on a track of `track_length` for a scrollport showing
+/// `visible_length` of `content_length`, and how far it travels along the track. The
+/// thumb is never shorter than the track is thick, so that it can still be seen.
+fn thumb_length_and_travel(
+    track_length: Au,
+    visible_length: Au,
+    content_length: Au,
+    thickness: Au,
+) -> (Au, Au) {
+    if content_length <= Au::zero() || track_length <= Au::zero() {
+        return (track_length, Au::zero());
+    }
+    let proportion = (visible_length.to_f32_px() / content_length.to_f32_px()).min(1.0);
+    let thumb_length = track_length
+        .scale_by(proportion)
+        .max(thickness.min(track_length));
+    (thumb_length, track_length - thumb_length)
+}
+
+/// The id of the WebRender transform binding that moves the thumb of one scrollbar of a
+/// scroll frame. It only has to be stable for that scroll frame across display lists
+/// (so that the transform the painter last set keeps applying) and distinct between
+/// scroll frames, so it is a hash of the frame's external scroll id and the axis.
+pub(crate) fn thumb_transform_key(external_scroll_id: wr::ExternalScrollId, vertical: bool) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    external_scroll_id.hash(&mut hasher);
+    vertical.hash(&mut hasher);
+    hasher.finish()
 }
