@@ -743,6 +743,79 @@ impl ShapedTextSlice {
         new.split_off_count(self.trailing_white_space.removable.count);
         Arc::new(new)
     }
+
+    /// Return the logically leading part of this [`ShapedTextSlice`] whose advance fits in
+    /// `available_advance`, with `separator_adjustment` added for every word separator (for
+    /// `text-align: justify`), along with that advance. Glyphs that represent no characters
+    /// stay with the glyph before them, so a cluster is never split. When `keep_first_cluster`
+    /// is true the first cluster is kept even if it does not fit. Returns `None` if nothing is
+    /// kept.
+    pub fn leading_part_fitting_in(
+        &self,
+        available_advance: Au,
+        separator_adjustment: Au,
+        keep_first_cluster: bool,
+    ) -> Option<(Arc<ShapedTextSlice>, Au)> {
+        // Glyphs are stored in physical left-to-right order, so the logical start of
+        // right-to-left text is at the end of the glyph range.
+        let glyphs = self.glyphs();
+        let glyphs = if self.shaped_text.is_rtl {
+            Either::Left(glyphs.rev())
+        } else {
+            Either::Right(glyphs)
+        };
+
+        let mut glyph_count = 0;
+        let mut character_count = Utf32CodeUnits(0);
+        let mut total_word_separators = 0;
+        let mut total_advance = Au::zero();
+        let mut adjusted_advance = Au::zero();
+        for glyph in glyphs {
+            let mut advance = glyph.advance();
+            if glyph.char_is_word_separator() {
+                advance += separator_adjustment;
+            }
+            let starts_cluster = glyph.character_count().0 > 0;
+            let keep_anyway = !starts_cluster || (keep_first_cluster && character_count.0 == 0);
+            if adjusted_advance + advance > available_advance && !keep_anyway {
+                break;
+            }
+            glyph_count += 1;
+            character_count += glyph.character_count();
+            total_advance += glyph.advance();
+            adjusted_advance += advance;
+            if glyph.char_is_word_separator() {
+                total_word_separators += 1;
+            }
+        }
+
+        if glyph_count == 0 {
+            return None;
+        }
+
+        let glyph_range = if self.shaped_text.is_rtl {
+            self.glyph_range.end - glyph_count..self.glyph_range.end
+        } else {
+            self.glyph_range.start..self.glyph_range.start + glyph_count
+        };
+        Some((
+            Arc::new(ShapedTextSlice {
+                shaped_text: self.shaped_text.clone(),
+                glyph_range,
+                total_advance,
+                character_count,
+                total_word_separators,
+                // This runs after line breaking, so no white space of the result is left
+                // to hang or be removed at the end of a line.
+                trailing_white_space: TrailingWhiteSpace {
+                    hangable: GlyphCountAndAdvance::new(0, Au::zero()),
+                    removable: GlyphCountAndAdvance::new(0, Au::zero()),
+                },
+                all_white_space: self.all_white_space,
+            }),
+            adjusted_advance,
+        ))
+    }
 }
 
 /// A data structure used to efficiently slice up a [`ShapedText`] into [`ShapedTextSlice`]s.
