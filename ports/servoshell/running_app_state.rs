@@ -7,6 +7,7 @@
 use std::cell::{Cell, Ref, RefCell};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::net::Ipv4Addr;
 use std::rc::Rc;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -267,6 +268,7 @@ impl RunningAppState {
         let webdriver_receiver = servoshell_preferences.webdriver_port.get().map(|port| {
             let (embedder_sender, embedder_receiver) = unbounded();
             webdriver_server::start_server(
+                Ipv4Addr::UNSPECIFIED.into(),
                 port,
                 embedder_sender,
                 event_loop_waker,
