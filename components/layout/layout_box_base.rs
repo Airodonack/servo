@@ -4,7 +4,7 @@
 
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use app_units::Au;
 use atomic_refcell::{AtomicRef, AtomicRefCell};
@@ -26,8 +26,9 @@ use crate::fragment_tree::{
     BaseFragmentInfo, BoxFragment, CollapsedBlockMargins, Fragment, FragmentStatus,
     SpecificLayoutInfo,
 };
-use crate::geom::LogicalSides1D;
+use crate::geom::{LogicalSides1D, PhysicalSides};
 use crate::positioned::{PositioningContext, relative_adjustement};
+use crate::scrollbars::{ScrollbarAxes, auto_axes, scrollbar_gutter};
 use crate::sizing::{ComputeInlineContentSizes, InlineContentSizesResult, SizeConstraint};
 use crate::traversal::ElementDamageSet;
 use crate::{ConstraintSpace, ContainingBlock, ContainingBlockSize, HasQuirkyBlockSize};
@@ -62,6 +63,15 @@ pub(crate) struct LayoutBoxBase {
 
     pub fragments: AtomicRefCell<Vec<Fragment>>,
     pub parent_box: Option<WeakLayoutBox>,
+
+    /// For a scroll container with `overflow: auto`, the axes in which its content
+    /// overflowed the last time it was laid out ([`ScrollbarAxes`] bits). Classic
+    /// scrollbars are shown, and their gutter reserved, only in those axes.
+    overflowing_auto_axes: AtomicU8,
+
+    /// The [`LayoutContext::fresh_cache_epoch`] of the last pass with fresh caches in
+    /// which this box was laid out.
+    cache_epoch: AtomicU32,
 }
 
 impl LayoutBoxBase {
@@ -79,6 +89,63 @@ impl LayoutBoxBase {
             subtree_size: AtomicUsize::default(),
             fragments: AtomicRefCell::default(),
             parent_box: None,
+            overflowing_auto_axes: AtomicU8::default(),
+            cache_epoch: AtomicU32::default(),
+        }
+    }
+
+    /// In a layout pass that must not reuse results cached before it, drop this box's
+    /// cached layout results the first time they are looked up in that pass.
+    fn drop_caches_from_earlier_passes(&self, layout_context: &LayoutContext) {
+        let epoch = layout_context.fresh_cache_epoch();
+        if epoch == 0 || self.cache_epoch.swap(epoch, Ordering::Relaxed) == epoch {
+            return;
+        }
+        self.cached_layout_result_dirty
+            .store(true, Ordering::Relaxed);
+        *self.cached_inline_content_size.borrow_mut() = None;
+    }
+
+    /// The axes in which this `overflow: auto` scroll container overflowed when it was
+    /// last laid out.
+    pub(crate) fn overflowing_auto_axes(&self) -> ScrollbarAxes {
+        ScrollbarAxes::from_bits_truncate(self.overflowing_auto_axes.load(Ordering::Relaxed))
+    }
+
+    /// The scrollbar gutter of this box on each physical side, given the scrollbars it
+    /// shows. Zero unless it is a scroll container.
+    pub(crate) fn scrollbar_gutter(&self) -> PhysicalSides<Au> {
+        scrollbar_gutter(
+            &self.style,
+            self.base_fragment_info.flags,
+            self.overflowing_auto_axes(),
+        )
+    }
+
+    /// Record in which `overflow: auto` axes the newly laid out fragment of this box
+    /// overflows. When that changes, the box shows or hides a classic scrollbar and so
+    /// gains or loses its gutter: layout is run again (see
+    /// [`LayoutContext::auto_scrollbars_changed`]).
+    pub(crate) fn update_overflowing_auto_axes(
+        &self,
+        layout_context: &LayoutContext,
+        fragment: &Fragment,
+    ) {
+        let (Fragment::Box(box_fragment) | Fragment::Float(box_fragment)) = fragment else {
+            return;
+        };
+        let auto_axes = auto_axes(&self.style, self.base_fragment_info.flags);
+        if auto_axes.is_empty() {
+            return;
+        }
+        let overflowing = box_fragment.with_style().overflowing_axes() & auto_axes;
+        let previous = self
+            .overflowing_auto_axes
+            .swap(overflowing.bits(), Ordering::Relaxed);
+        if previous != overflowing.bits() {
+            layout_context
+                .auto_scrollbars_changed
+                .store(true, Ordering::Relaxed);
         }
     }
 
@@ -100,6 +167,7 @@ impl LayoutBoxBase {
         constraint_space: &ConstraintSpace,
         layout_box: &impl ComputeInlineContentSizes,
     ) -> InlineContentSizesResult {
+        self.drop_caches_from_earlier_passes(layout_context);
         let mut cache = self.cached_inline_content_size.borrow_mut();
         if let Some(cached_inline_content_size) = cache.as_ref() {
             let (previous_cb_block_size, result) = **cached_inline_content_size;
@@ -200,8 +268,10 @@ impl LayoutBoxBase {
 
     pub(crate) fn cached_content_block_size_under_default_constraint_if_applicable(
         &self,
+        layout_context: &LayoutContext,
         inline_size: Au,
     ) -> Option<Au> {
+        self.drop_caches_from_earlier_passes(layout_context);
         if self.cached_layout_result_dirty.load(Ordering::Relaxed) {
             return None;
         }
@@ -224,9 +294,11 @@ impl LayoutBoxBase {
     /// we would get under a default constraint, if applicable.
     pub(crate) fn cached_independent_formatting_context_layout_if_applicable(
         &self,
+        layout_context: &LayoutContext,
         positioning_context: &mut PositioningContext,
         containing_block_for_children: &ContainingBlock<'_>,
     ) -> Result<IndependentFormattingContextLayoutResult, Option<Au>> {
+        self.drop_caches_from_earlier_passes(layout_context);
         if self.cached_layout_result_dirty.load(Ordering::Relaxed) {
             return Err(None);
         }
@@ -282,11 +354,13 @@ impl LayoutBoxBase {
 
     pub(crate) fn cached_same_formatting_context_block_if_applicable(
         &self,
+        layout_context: &LayoutContext,
         containing_block: &ContainingBlock,
         collapsible_with_parent_start_margin: Option<CollapsibleWithParentStartMargin>,
         ignore_block_margins_for_stretch: LogicalSides1D<bool>,
         has_inline_parent: bool,
     ) -> Option<Arc<BoxFragment>> {
+        self.drop_caches_from_earlier_passes(layout_context);
         if self.cached_layout_result_dirty.load(Ordering::Relaxed) {
             return None;
         }

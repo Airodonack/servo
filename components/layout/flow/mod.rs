@@ -1078,7 +1078,10 @@ impl BlockLevelBox {
             },
         };
 
-        self.with_base(|base| base.set_fragment(fragment.clone()));
+        self.with_base(|base| {
+            base.update_overflowing_auto_axes(layout_context, &fragment);
+            base.set_fragment(fragment.clone())
+        });
 
         fragment
     }
@@ -1217,6 +1220,10 @@ impl IndependentFormattingContext {
             pbm.border.to_physical(containing_block_writing_mode),
             margin.to_physical(containing_block_writing_mode),
             layout.specific_layout_info,
+        )
+        .with_scrollbar_gutter(
+            pbm.scrollbar_gutter
+                .to_physical(containing_block_writing_mode),
         )
         .with_baselines(layout.baselines)
         .with_block_level_layout_info(block_margins_collapsed_with_children, None)
@@ -1597,6 +1604,10 @@ impl IndependentFormattingContext {
             pbm.border.to_physical(containing_block_writing_mode),
             margin.to_physical(containing_block_writing_mode),
             layout.specific_layout_info,
+        )
+        .with_scrollbar_gutter(
+            pbm.scrollbar_gutter
+                .to_physical(containing_block_writing_mode),
         )
         .with_baselines(layout.baselines)
         .with_block_level_layout_info(CollapsedBlockMargins::from_margin(&margin), clearance)
@@ -2435,7 +2446,8 @@ impl IndependentFormattingContext {
             pbm.border.to_physical(container_writing_mode),
             margin.to_physical(container_writing_mode),
             specific_layout_info,
-        );
+        )
+        .with_scrollbar_gutter(pbm.scrollbar_gutter.to_physical(container_writing_mode));
 
         IndependentFloatOrAtomicLayoutResult {
             fragment,

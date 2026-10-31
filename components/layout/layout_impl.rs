@@ -8,6 +8,7 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, LazyLock};
 
 use accesskit::{ActionRequest, Node};
@@ -109,6 +110,12 @@ use crate::{BoxTree, FragmentTree};
 // And: https://gist.github.com/mukilan/ed57eb61b83237a05fbf6360ec5e33b0
 static STYLE_THREAD_POOL: Mutex<&LazyLock<style::global_style_data::StyleThreadPool>> =
     Mutex::new(&style::global_style_data::STYLE_THREAD_POOL);
+
+/// How many times layout may run again in one reflow because `overflow: auto` scroll
+/// containers started or stopped showing a classic scrollbar. One is enough unless a
+/// scrollbar appearing in one container makes another overflow; the bound keeps content
+/// that overflows only without a scrollbar from making layout loop.
+const MAX_EXTRA_LAYOUT_PASSES_FOR_SCROLLBARS: usize = 2;
 
 /// A CSS file to style the user agent stylesheet.
 static USER_AGENT_CSS: &[u8] = include_bytes!("./stylesheets/user-agent.css");
@@ -1351,6 +1358,8 @@ impl LayoutThread {
             parallelism_job_count_minimum: pref!(layout_parallelism_job_count_minimum) as usize,
             parallelism_job_size_minimum: pref!(layout_parallelism_job_size_minimum) as usize,
             device_size: reflow_request.viewport_details.device_size.cast_unit(),
+            auto_scrollbars_changed: AtomicBool::new(false),
+            fresh_cache_epoch: AtomicU32::new(0),
         };
 
         let restyle = reflow_request
@@ -1459,7 +1468,10 @@ impl LayoutThread {
 
             if layout_roots
                 .iter()
-                .all(|layout_root| layout_root.try_layout(&layout_context))
+                .all(|layout_root| layout_root.try_layout(&layout_context)) &&
+                !layout_context
+                    .auto_scrollbars_changed
+                    .load(Ordering::Relaxed)
             {
                 return (
                     ReflowPhasesRun::RanLayout,
@@ -1487,11 +1499,36 @@ impl LayoutThread {
                 .unwrap()
                 .layout(recalc_style_traversal.context(), viewport_size)
         };
-        let fragment_tree = Rc::new(if let Some(pool) = rayon_pool {
-            pool.install(run_layout)
-        } else {
-            run_layout()
-        });
+        let run_layout = || {
+            if let Some(pool) = rayon_pool {
+                pool.install(run_layout)
+            } else {
+                run_layout()
+            }
+        };
+
+        // A scroll container with `overflow: auto` shows a classic scrollbar only when its
+        // content overflows, and the scrollbar's gutter narrows (or shortens) its content
+        // box, so finding out that it does means laying out again. Layout records what it
+        // found in each box, so later layouts start from it and usually need one pass.
+        if layout_context
+            .auto_scrollbars_changed
+            .load(Ordering::Relaxed)
+        {
+            layout_context.start_pass_with_fresh_caches();
+        }
+        let mut fragment_tree = run_layout();
+        for _ in 0..MAX_EXTRA_LAYOUT_PASSES_FOR_SCROLLBARS {
+            if !layout_context
+                .auto_scrollbars_changed
+                .load(Ordering::Relaxed)
+            {
+                break;
+            }
+            layout_context.start_pass_with_fresh_caches();
+            fragment_tree = run_layout();
+        }
+        let fragment_tree = Rc::new(fragment_tree);
 
         *self.fragment_tree.borrow_mut() = Some(fragment_tree);
 
