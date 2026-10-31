@@ -17,7 +17,7 @@ use std::borrow::ToOwned;
 use std::cell::LazyCell;
 use std::collections::BTreeMap;
 use std::io::Cursor;
-use std::net::{SocketAddr, SocketAddrV4};
+use std::net::{IpAddr, SocketAddr};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use std::{env, fmt, process, thread};
@@ -134,7 +134,12 @@ fn cookie_msg_to_cookie(cookie: cookie::Cookie) -> Cookie {
     }
 }
 
+/// Starts the WebDriver HTTP server on its own thread, listening on
+/// `address`:`port`. An embedder that only drives itself from the same
+/// machine passes a loopback address; servoshell passes the unspecified
+/// address, which listens on every interface.
 pub fn start_server(
+    address: IpAddr,
     port: u16,
     embedder_sender: Sender<WebDriverCommandMsg>,
     event_loop_waker: Box<dyn EventLoopWaker>,
@@ -145,9 +150,8 @@ pub fn start_server(
     thread::Builder::new()
         .name("WebDriverHttpServer".to_owned())
         .spawn(move || {
-            let address = SocketAddrV4::new("0.0.0.0".parse().unwrap(), port);
             match webdriver::server::start(
-                SocketAddr::V4(address),
+                SocketAddr::new(address, port),
                 vec![],
                 vec![],
                 handler,
