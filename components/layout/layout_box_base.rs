@@ -3,8 +3,8 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 use std::fmt::{Debug, Formatter};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use app_units::Au;
 use atomic_refcell::{AtomicRef, AtomicRefCell};
@@ -28,7 +28,7 @@ use crate::fragment_tree::{
 };
 use crate::geom::{LogicalSides1D, PhysicalSides};
 use crate::positioned::{PositioningContext, relative_adjustement};
-use crate::scrollbars::{ScrollbarAxes, auto_axes, scrollbar_gutter};
+use crate::scrollbars::{AutoScrollbarState, ScrollbarAxes, auto_axes, scrollbar_gutter};
 use crate::sizing::{ComputeInlineContentSizes, InlineContentSizesResult, SizeConstraint};
 use crate::traversal::ElementDamageSet;
 use crate::{ConstraintSpace, ContainingBlock, ContainingBlockSize, HasQuirkyBlockSize};
@@ -65,9 +65,10 @@ pub(crate) struct LayoutBoxBase {
     pub parent_box: Option<WeakLayoutBox>,
 
     /// For a scroll container with `overflow: auto`, the axes in which its content
-    /// overflowed the last time it was laid out ([`ScrollbarAxes`] bits). Classic
-    /// scrollbars are shown, and their gutter reserved, only in those axes.
-    overflowing_auto_axes: AtomicU8,
+    /// overflows. Classic scrollbars are shown, and their gutter reserved, only in those
+    /// axes. Created the first time such a box is laid out.
+    #[conditional_malloc_size_of]
+    auto_scrollbar_state: OnceLock<Arc<AutoScrollbarState>>,
 
     /// The [`LayoutContext::fresh_cache_epoch`] of the last pass with fresh caches in
     /// which this box was laid out.
@@ -89,7 +90,7 @@ impl LayoutBoxBase {
             subtree_size: AtomicUsize::default(),
             fragments: AtomicRefCell::default(),
             parent_box: None,
-            overflowing_auto_axes: AtomicU8::default(),
+            auto_scrollbar_state: OnceLock::new(),
             cache_epoch: AtomicU32::default(),
         }
     }
@@ -106,10 +107,13 @@ impl LayoutBoxBase {
         *self.cached_inline_content_size.borrow_mut() = None;
     }
 
-    /// The axes in which this `overflow: auto` scroll container overflowed when it was
-    /// last laid out.
+    /// The axes in which this `overflow: auto` scroll container overflows, as found by
+    /// its last layout in an earlier layout pass.
     pub(crate) fn overflowing_auto_axes(&self) -> ScrollbarAxes {
-        ScrollbarAxes::from_bits_truncate(self.overflowing_auto_axes.load(Ordering::Relaxed))
+        self.auto_scrollbar_state
+            .get()
+            .map(|state| state.current())
+            .unwrap_or_default()
     }
 
     /// The scrollbar gutter of this box on each physical side, given the scrollbars it
@@ -123,9 +127,10 @@ impl LayoutBoxBase {
     }
 
     /// Record in which `overflow: auto` axes the newly laid out fragment of this box
-    /// overflows. When that changes, the box shows or hides a classic scrollbar and so
-    /// gains or loses its gutter: layout is run again (see
-    /// [`LayoutContext::auto_scrollbars_changed`]).
+    /// overflows. If that is not what the box was laid out with and no later layout of
+    /// the box in this pass says otherwise, the box shows or hides a classic scrollbar
+    /// and so gains or loses its gutter: layout is run again (see
+    /// [`LayoutContext::apply_scrollbar_observations`]).
     pub(crate) fn update_overflowing_auto_axes(
         &self,
         layout_context: &LayoutContext,
@@ -139,13 +144,9 @@ impl LayoutBoxBase {
             return;
         }
         let overflowing = box_fragment.with_style().overflowing_axes() & auto_axes;
-        let previous = self
-            .overflowing_auto_axes
-            .swap(overflowing.bits(), Ordering::Relaxed);
-        if previous != overflowing.bits() {
-            layout_context
-                .auto_scrollbars_changed
-                .store(true, Ordering::Relaxed);
+        let state = self.auto_scrollbar_state.get_or_init(Default::default);
+        if state.record(overflowing) {
+            layout_context.register_scrollbar_observation(state.clone());
         }
     }
 
