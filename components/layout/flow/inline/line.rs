@@ -966,8 +966,10 @@ impl LineItemLayout<'_, '_> {
             let Some(ellipsis) = self.ellipsis.as_ref() else {
                 return;
             };
-            let padding_border =
-                (atomic.fragment.padding + atomic.fragment.border).to_logical(ifc_writing_mode);
+            let padding_border = (atomic.fragment.padding +
+                atomic.fragment.border +
+                atomic.fragment.scrollbar_gutter)
+                .to_logical(ifc_writing_mode);
             let border_rect = LogicalRect {
                 start_corner: LogicalVec2 {
                     inline: content_rect.start_corner.inline - padding_border.inline_start,

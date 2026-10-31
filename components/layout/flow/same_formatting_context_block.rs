@@ -106,6 +106,7 @@ impl SameFormattingContextBlock {
             let Some(cached_result) = self
                 .base
                 .cached_same_formatting_context_block_if_applicable(
+                    layout_context,
                     containing_block,
                     collapsible_with_parent_start_margin,
                     ignore_block_margins_for_stretch,

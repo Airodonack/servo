@@ -25,7 +25,7 @@ use crate::flexbox::FlexContainer;
 use crate::flow::BlockFormattingContext;
 use crate::flow::inline::InlineFormattingContext;
 use crate::fragment_tree::{BaseFragmentInfo, FragmentFlags};
-use crate::geom::LogicalVec2;
+use crate::geom::{LogicalVec2, PhysicalSides};
 use crate::layout_box_base::{IndependentFormattingContextLayoutResult, LayoutBoxBase};
 use crate::positioned::{LayoutRootLayoutInputs, PositioningContext};
 use crate::replaced::ReplacedContents;
@@ -560,6 +560,7 @@ impl IndependentFormattingContext {
         let content_block_size_under_default_constraint = match self
             .base
             .cached_independent_formatting_context_layout_if_applicable(
+                layout_context,
                 positioning_context,
                 containing_block_for_children,
             ) {
@@ -672,7 +673,10 @@ impl IndependentFormattingContext {
     ) -> Au {
         if let Some(content_block_size) = self
             .base
-            .cached_content_block_size_under_default_constraint_if_applicable(inline_size)
+            .cached_content_block_size_under_default_constraint_if_applicable(
+                layout_context,
+                inline_size,
+            )
         {
             return content_block_size;
         }
@@ -696,7 +700,7 @@ impl IndependentFormattingContext {
 
     #[inline]
     pub(crate) fn layout_style(&self) -> LayoutStyle<'_> {
-        match &self.contents {
+        let layout_style = match &self.contents {
             IndependentFormattingContextContents::Replaced(replaced, _) => {
                 replaced.layout_style(&self.base)
             },
@@ -704,6 +708,19 @@ impl IndependentFormattingContext {
             IndependentFormattingContextContents::Flex(fc) => fc.layout_style(),
             IndependentFormattingContextContents::Grid(fc) => fc.layout_style(),
             IndependentFormattingContextContents::Table(fc) => fc.layout_style(None),
+        };
+        // Every scroll container is an independent formatting context: this is where
+        // the space taken by its scrollbars enters its padding, border and margin.
+        match layout_style {
+            LayoutStyle::Default(style) => {
+                let scrollbar_gutter = self.base.scrollbar_gutter();
+                if scrollbar_gutter == PhysicalSides::zero() {
+                    LayoutStyle::Default(style)
+                } else {
+                    LayoutStyle::ScrollContainer(style, scrollbar_gutter)
+                }
+            },
+            layout_style => layout_style,
         }
     }
 

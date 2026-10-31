@@ -68,6 +68,9 @@ struct FlexItem<'a> {
     border: FlexRelativeSides<Au>,
     margin: FlexRelativeSides<AuOrAuto>,
 
+    /// The scrollbar gutter of a scroll container, also included in `padding`.
+    scrollbar_gutter: FlexRelativeSides<Au>,
+
     /// Sum of padding, border, and margin (with `auto` assumed to be zero) in each axis.
     /// This is the difference between an outer and inner size.
     pbm_auto_is_zero: FlexRelativeVec2<Au>,
@@ -284,6 +287,11 @@ impl FlexLineItem<'_> {
                 .sides_to_flow_relative(item_margin)
                 .to_physical(container_writing_mode),
             self.layout_result.specific_layout_info,
+        )
+        .with_scrollbar_gutter(
+            flex_context
+                .sides_to_flow_relative(self.item.scrollbar_gutter)
+                .to_physical(container_writing_mode),
         );
 
         // If this flex item establishes a containing block for absolutely-positioned
@@ -303,11 +311,10 @@ impl FlexLineItem<'_> {
         }
 
         let fragment = Arc::new(fragment);
-        self.item
-            .box_
-            .independent_formatting_context
-            .base
-            .set_fragment(Fragment::Box(fragment.clone()));
+        let fragment_for_base = Fragment::Box(fragment.clone());
+        let base = &self.item.box_.independent_formatting_context.base;
+        base.update_overflowing_auto_axes(flex_context.layout_context, &fragment_for_base);
+        base.set_fragment(fragment_for_base);
         (fragment, self.layout_result.positioning_context)
     }
 }
@@ -2481,6 +2488,7 @@ impl FlexItemBox {
             padding,
             border,
             margin: config.sides_to_flex_relative(pbm.margin),
+            scrollbar_gutter: config.sides_to_flex_relative(pbm.scrollbar_gutter),
             pbm_auto_is_zero,
             flex_base_size,
             flex_base_size_is_definite,
