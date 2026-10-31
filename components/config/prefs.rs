@@ -43,6 +43,8 @@ pub fn set(preferences: Preferences) {
     // Stylo keeps these properties behind preferences that default to off; Servo always
     // exposes them, so they are turned on here, before the early return below, which would
     // otherwise skip them whenever the preferences are the defaults (as they are at startup).
+    // <https://drafts.csswg.org/css-scrollbars-1/>
+    stylo_static_prefs::set_pref!("layout.css.scrollbar-styling.enabled", true);
     // <https://drafts.csswg.org/css-overflow-3/#text-overflow>
     stylo_static_prefs::set_pref!("layout.css.text-overflow.enabled", true);
 
