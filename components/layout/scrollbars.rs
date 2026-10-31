@@ -14,9 +14,11 @@
 //! > dimensions of) the containing block formed by the element with the scrollbars.
 
 use std::hash::{DefaultHasher, Hash, Hasher};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use app_units::Au;
 use bitflags::bitflags;
+use malloc_size_of_derive::MallocSizeOf;
 use style::Zero;
 use style::computed_values::direction::T as Direction;
 use style::computed_values::scrollbar_width::T as ScrollbarWidth;
@@ -49,6 +51,44 @@ bitflags! {
         const VERTICAL = 1 << 0;
         /// The scrollbar along the bottom edge, scrolling horizontally.
         const HORIZONTAL = 1 << 1;
+    }
+}
+
+/// For a scroll container with `overflow: auto`, the axes in which its content
+/// overflows, which decide where it shows classic scrollbars. Layout lays the box out
+/// with `current`. Each layout of the box records what it found in `pending`, and the
+/// last one in a layout pass wins: a box is often laid out more than once in a pass (a
+/// flex container measures an item with an indefinite size before its final layout)
+/// and only the final layout tells whether the content overflows. Between passes,
+/// [`LayoutContext::apply_scrollbar_observations`](crate::context::LayoutContext)
+/// moves `pending` to `current`, so that every layout in one pass agrees on the
+/// scrollbars of each box.
+#[derive(Debug, Default, MallocSizeOf)]
+pub(crate) struct AutoScrollbarState {
+    current: AtomicU8,
+    pending: AtomicU8,
+    /// Whether this state is in the layout context's list of states to apply.
+    registered: AtomicBool,
+}
+
+impl AutoScrollbarState {
+    /// The overflowing axes the box is laid out with.
+    pub(crate) fn current(&self) -> ScrollbarAxes {
+        ScrollbarAxes::from_bits_truncate(self.current.load(Ordering::Relaxed))
+    }
+
+    /// Record the overflowing axes found by a layout of the box. Returns true when the
+    /// state has to be registered with the layout context to be applied after the pass.
+    pub(crate) fn record(&self, overflowing: ScrollbarAxes) -> bool {
+        self.pending.store(overflowing.bits(), Ordering::Relaxed);
+        overflowing != self.current() && !self.registered.swap(true, Ordering::Relaxed)
+    }
+
+    /// Make the last recorded axes current. Returns true if they changed.
+    pub(crate) fn apply(&self) -> bool {
+        self.registered.store(false, Ordering::Relaxed);
+        let pending = self.pending.load(Ordering::Relaxed);
+        self.current.swap(pending, Ordering::Relaxed) != pending
     }
 }
 
