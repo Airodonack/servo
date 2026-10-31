@@ -516,6 +516,12 @@ impl TaffyContainer {
             },
             _ => panic!("Servo is only configured to use Taffy for CSS Grid layout"),
         };
+        let first_baseline = self
+            .first_baseline_from_grid_items(
+                container_ctx.specific_layout_info.as_ref(),
+                align_items.0,
+            )
+            .unwrap_or(output.baselines.first);
 
         let writing_mode = containing_block.style.writing_mode;
         let physical_padding = pbm.padding.to_physical(writing_mode);
@@ -697,7 +703,7 @@ impl TaffyContainer {
             content_block_size: Au::from_f32_px(output.size.height) - pbm.padding_border_sums.block,
             content_inline_size_for_table: None,
             baselines: Baselines {
-                first: output.baselines.first.map(|baseline| {
+                first: first_baseline.map(|baseline| {
                     Au::from_f32_px(baseline) - pbm.padding.block_start - pbm.border.block_start
                 }),
                 last: output.baselines.last.map(|baseline| {
@@ -713,6 +719,81 @@ impl TaffyContainer {
             specific_layout_info: container_ctx.specific_layout_info,
             collapsible_margins_in_children: CollapsedBlockMargins::zero(),
         }
+    }
+
+    /// The first baseline of the grid container, relative to its border box, or `None` when
+    /// Taffy's own answer should be used.
+    ///
+    /// From <https://drafts.csswg.org/css-grid/#grid-baselines>:
+    /// > If any of the grid items whose areas intersect the grid container's first row
+    /// > participate in baseline alignment, the grid container's baseline set is generated
+    /// > from the shared alignment baseline of those grid items. Otherwise, if the grid
+    /// > container has at least one grid item, the grid container's first baseline set is
+    /// > generated from the alignment baseline of the first grid item in row-major grid
+    /// > order. If the grid item has no alignment baseline in the grid's inline axis, then
+    /// > one is first synthesized from its border edges.
+    ///
+    /// Taffy only knows the baselines of items from its baseline alignment pass, so without
+    /// such items it synthesizes one from the first item's border box even when that item
+    /// has text with a baseline of its own. Servo keeps the baseline of each item's final
+    /// layout, so the container's baseline is taken from there.
+    fn first_baseline_from_grid_items(
+        &self,
+        specific_layout_info: Option<&SpecificLayoutInfo>,
+        align_items: AlignFlags,
+    ) -> Option<Option<f32>> {
+        let Some(SpecificLayoutInfo::Grid(grid_info)) = specific_layout_info else {
+            return None;
+        };
+
+        // Taffy reports grid items, which are the in-flow children, in document order. Bail
+        // out if that order could differ from the order of the children here.
+        let children: Vec<_> = self
+            .children
+            .iter()
+            .map(|child| (**child).borrow())
+            .filter(|child| matches!(child.taffy_level_box, TaffyItemBoxInner::InFlowBox(_)))
+            .collect();
+        if children.len() != grid_info.info.items.len() ||
+            children
+                .iter()
+                .any(|child| child.style.slow_clone_order() != 0)
+        {
+            return None;
+        }
+
+        let items = children.iter().zip(grid_info.info.items.iter());
+        let first_row = items.clone().map(|(_, item)| item.row_start).min()?;
+        // Items aligned by `last baseline` take part in the last baseline set, not the first.
+        let participates_in_baseline_alignment = |child: &TaffyItemBox| {
+            let align_self = match child.style.slow_clone_align_self().0.value() {
+                AlignFlags::AUTO => align_items.value(),
+                align_self => align_self,
+            };
+            let margin = child.style.get_margin();
+            align_self == AlignFlags::BASELINE &&
+                !margin.margin_top.is_auto() &&
+                !margin.margin_bottom.is_auto()
+        };
+        // Items of the first row that participate in baseline alignment share their baseline,
+        // so the first of them gives it; otherwise the first item does.
+        let row_major_order =
+            |(_, item): &(&AtomicRef<TaffyItemBox>, &taffy::DetailedGridItemsInfo)| {
+                (item.row_start, item.column_start)
+            };
+        let (first_item, _) = items
+            .clone()
+            .filter(|(child, item)| {
+                item.row_start == first_row && participates_in_baseline_alignment(child)
+            })
+            .min_by_key(row_major_order)
+            .or_else(|| items.min_by_key(row_major_order))?;
+        let layout = &first_item.taffy_layout;
+        let baseline = first_item
+            .taffy_baselines
+            .first
+            .unwrap_or(layout.size.height);
+        Some(Some(layout.location.y + baseline))
     }
 
     #[inline]
