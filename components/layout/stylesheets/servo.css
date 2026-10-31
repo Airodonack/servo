@@ -213,7 +213,7 @@ input::color-swatch {
 
 /* Range inputs */
 input[type="range"] {
-  margin-inline: 8px;
+  margin: 2px;
   width: 100px;
   min-height: 16px;
   padding: 0px;
@@ -282,10 +282,10 @@ input[type="range"]:disabled::slider-thumb {
   border-color: rgba(180, 180, 180);
 }
 
-/* Checkbox and radio button inputs */
+/* Checkbox and radio button inputs, sized and spaced as in other engines. */
 input[type="checkbox"],
 input[type="radio"] {
-  margin-inline: 4px 2px;
+  padding: 0;
 
   /* Offset the outline a bit so that it doesn't just make the rounded border thicker. */
   outline-offset: 0.4px;
@@ -305,13 +305,14 @@ input[type="checkbox"]:disabled {
 input[type="checkbox"] {
   display: inline-block;
   position: relative;
+  margin: 3px 3px 3px 4px;
 
-  width: 14px;
-  height: 14px;
-  max-width: 14px;
-  max-height: 14px;
-  min-width: 14px;
-  min-height: 14px;
+  width: 13px;
+  height: 13px;
+  max-width: 13px;
+  max-height: 13px;
+  min-width: 13px;
+  min-height: 13px;
 
   border-radius: 2px;
 
@@ -353,10 +354,11 @@ input[type="radio"] {
      element. These values should probably be changed once `aspect-ratio` has been supported
      for non-replaced elements.
   */
-  min-height: 14px;
-  min-width: 14px;
-  height: 14px;
-  width: 14px;
+  margin: 3px 3px 0 5px;
+  min-height: 13px;
+  min-width: 13px;
+  height: 13px;
+  width: 13px;
 }
 
 /* This creates the ring of the radio input. TODO: It might be better to add a UA shadow tree instead of using pseudo elements. */
@@ -368,8 +370,8 @@ input[type="radio"]::before {
     However, this is currently not possible to be implemented as `aspect-ratio` hasn't
     been supported for non-replaced elements.
   */
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
 
   /* Center the bullet in the containing block. */
   position: absolute;
@@ -387,8 +389,8 @@ input[type="radio"]::after {
 
   /* TODO:  The bullet should be able to grow & shrink according to min(width, height).
   However, this is currently not possible to be implemented as `aspect-ratio` hasn't been supported for non-replaced elements. */
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
 
   /* Center the bullet in the containing block. */
   position: absolute;
@@ -421,10 +423,11 @@ canvas, embed, iframe, img, video {
   overflow-clip-margin: 0 !important;
 }
 
+/* The inner editor and the placeholder keep `white-space: pre`; the element itself does not
+   set it, as in other engines. */
 input:not([type=radio i], [type=checkbox i], [type=reset i], [type=button i], [type=submit i], [type=file i], [type=range i]) {
   cursor: text;
   overflow: hidden !important;
-  white-space: pre;
 }
 
 input:is([type=submit i], [type=reset i], [type=button i], [type=checkbox i], [type=radio i], [type=color i]) {
