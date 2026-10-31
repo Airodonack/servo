@@ -447,19 +447,20 @@ codegen-units = 1
 [patch.crates-io]
 # Stylo 0.22.0 with `scrollbar-width`, `scrollbar-color` and `scrollbar-gutter`
 # enabled for Servo (they were behind `layout.unimplemented` or Gecko-only):
-# branch servo-scrollbars-0.22.0 of the stylo fork. Every crate of its
-# workspace is patched together, or two copies of the shared ones get built.
-selectors = { path = "../stylo/selectors" }
-servo_arc = { path = "../stylo/servo_arc" }
-stylo = { path = "../stylo/style" }
-stylo_atoms = { path = "../stylo/stylo_atoms" }
-stylo_derive = { path = "../stylo/style_derive" }
-stylo_dom = { path = "../stylo/stylo_dom" }
-stylo_malloc_size_of = { path = "../stylo/malloc_size_of" }
-stylo_static_prefs = { path = "../stylo/stylo_static_prefs" }
-stylo_traits = { path = "../stylo/style_traits" }
-to_shmem = { path = "../stylo/to_shmem" }
-to_shmem_derive = { path = "../stylo/to_shmem_derive" }
+# branch vodscribe/v0.22.0 of the Airodonack/stylo fork of servo/stylo. Every
+# crate of its workspace is patched together, or two copies of the shared ones
+# get built.
+selectors = { git = "https://github.com/Airodonack/stylo", rev = "b5c009c00c159d11d9c01f4c01957f4b2290b767" }
+servo_arc = { git = "https://github.com/Airodonack/stylo", rev = "b5c009c00c159d11d9c01f4c01957f4b2290b767" }
+stylo = { git = "https://github.com/Airodonack/stylo", rev = "b5c009c00c159d11d9c01f4c01957f4b2290b767" }
+stylo_atoms = { git = "https://github.com/Airodonack/stylo", rev = "b5c009c00c159d11d9c01f4c01957f4b2290b767" }
+stylo_derive = { git = "https://github.com/Airodonack/stylo", rev = "b5c009c00c159d11d9c01f4c01957f4b2290b767" }
+stylo_dom = { git = "https://github.com/Airodonack/stylo", rev = "b5c009c00c159d11d9c01f4c01957f4b2290b767" }
+stylo_malloc_size_of = { git = "https://github.com/Airodonack/stylo", rev = "b5c009c00c159d11d9c01f4c01957f4b2290b767" }
+stylo_static_prefs = { git = "https://github.com/Airodonack/stylo", rev = "b5c009c00c159d11d9c01f4c01957f4b2290b767" }
+stylo_traits = { git = "https://github.com/Airodonack/stylo", rev = "b5c009c00c159d11d9c01f4c01957f4b2290b767" }
+to_shmem = { git = "https://github.com/Airodonack/stylo", rev = "b5c009c00c159d11d9c01f4c01957f4b2290b767" }
+to_shmem_derive = { git = "https://github.com/Airodonack/stylo", rev = "b5c009c00c159d11d9c01f4c01957f4b2290b767" }
 # If you need to temporarily test Servo with a local fork of some upstream
 # crate, add that here. Use the form:
 #
