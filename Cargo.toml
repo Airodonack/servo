@@ -502,3 +502,20 @@ codegen-units = 1
 #
 # [patch."https://github.com/servo/<repository>"]
 # <crate> = { path = "/path/to/local/checkout" }
+
+# Stylo main plus the fork's two commits (scrollbar-gutter compiled for Servo;
+# accent-color and the UA-only `-servo-accent-color` keyword), from branch
+# vodscribe/main of the stylo fork, pinned by rev. Every crate of its workspace
+# is patched together, or two copies of the shared ones get built.
+[patch."https://github.com/servo/stylo"]
+selectors = { git = "https://github.com/Airodonack/stylo", rev = "e3320a1f1a72f2ed8aca91769b5edfb86c46a543" }
+servo_arc = { git = "https://github.com/Airodonack/stylo", rev = "e3320a1f1a72f2ed8aca91769b5edfb86c46a543" }
+stylo = { git = "https://github.com/Airodonack/stylo", rev = "e3320a1f1a72f2ed8aca91769b5edfb86c46a543" }
+stylo_atoms = { git = "https://github.com/Airodonack/stylo", rev = "e3320a1f1a72f2ed8aca91769b5edfb86c46a543" }
+stylo_derive = { git = "https://github.com/Airodonack/stylo", rev = "e3320a1f1a72f2ed8aca91769b5edfb86c46a543" }
+stylo_dom = { git = "https://github.com/Airodonack/stylo", rev = "e3320a1f1a72f2ed8aca91769b5edfb86c46a543" }
+stylo_malloc_size_of = { git = "https://github.com/Airodonack/stylo", rev = "e3320a1f1a72f2ed8aca91769b5edfb86c46a543" }
+stylo_static_prefs = { git = "https://github.com/Airodonack/stylo", rev = "e3320a1f1a72f2ed8aca91769b5edfb86c46a543" }
+stylo_traits = { git = "https://github.com/Airodonack/stylo", rev = "e3320a1f1a72f2ed8aca91769b5edfb86c46a543" }
+to_shmem = { git = "https://github.com/Airodonack/stylo", rev = "e3320a1f1a72f2ed8aca91769b5edfb86c46a543" }
+to_shmem_derive = { git = "https://github.com/Airodonack/stylo", rev = "e3320a1f1a72f2ed8aca91769b5edfb86c46a543" }

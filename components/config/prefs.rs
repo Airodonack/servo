@@ -40,6 +40,12 @@ pub fn add_observer(observer: Box<dyn PreferencesObserver>) {
 /// Update the values of the global preferences for the current process. This also notifies the
 /// observers previously added using [`add_observer`].
 pub fn set(preferences: Preferences) {
+    // Stylo keeps these properties behind preferences that default to off; Servo always
+    // exposes them, so they are turned on here, before the early return below, which would
+    // otherwise skip them whenever the preferences are the defaults (as they are at startup).
+    // <https://drafts.csswg.org/css-scrollbars-1/>
+    stylo_static_prefs::set_pref!("layout.css.scrollbar-styling.enabled", true);
+
     // Get list of changes, returning early if the preferences haven't changed.
     let changed = preferences.diff(&PREFERENCES.read().unwrap());
     if changed.is_empty() {
