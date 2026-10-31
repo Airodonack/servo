@@ -38,6 +38,7 @@ fn add_mock_scroll_node(tree: &mut ScrollTree) -> (ScrollTreeNodeId, ExternalScr
             touch_action: TouchAction::Auto,
             offset: LayoutVector2D::zero(),
             offset_changed: Cell::new(false),
+            scrollbar_thumbs: Default::default(),
         }),
     );
     (scroll_node_id, external_id)
@@ -106,6 +107,7 @@ fn test_scroll_tree_simple_scroll_chaining() {
             touch_action: TouchAction::Auto,
             offset: LayoutVector2D::zero(),
             offset_changed: Cell::new(false),
+            scrollbar_thumbs: Default::default(),
         }),
     );
 

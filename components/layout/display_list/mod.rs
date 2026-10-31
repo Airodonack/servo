@@ -40,6 +40,7 @@ use style::values::computed::{
 use style::values::generics::NonNegative;
 use style::values::generics::color::ColorOrAuto;
 use style::values::generics::rect::Rect as StyleRect;
+use style::values::generics::ui::ScrollbarColor;
 use style::values::specified::text::TextDecorationLine;
 use style_traits::{CSSPixel as StyloCSSPixel, DevicePixel as StyloDevicePixel};
 use webrender_api::units::{
@@ -68,6 +69,7 @@ use crate::geom::{
     LengthPercentageOrAuto, PhysicalPoint, PhysicalRect, PhysicalSides, PhysicalSize,
 };
 use crate::replaced::NaturalSizes;
+use crate::scrollbars::scrollbar_parts;
 use crate::style_ext::{BorderStyleColor, ComputedValuesExt};
 
 mod background;
@@ -1107,6 +1109,73 @@ impl PaintTraversalHandler for DisplayListBuilder<'_> {
             return;
         };
         BuilderForBoxFragment::new(&fragment, state.origin).build_outline(self, state)
+    }
+
+    fn visit_box_for_scrollbars(&mut self, state: &TraversalState, fragment: &Arc<BoxFragment>) {
+        let fragment = fragment.with_style();
+        let style = fragment.style();
+        if style.get_inherited_box().visibility != Visibility::Visible {
+            return;
+        }
+        let (scrollbars, corner) = scrollbar_parts(&fragment, state.origin);
+        if scrollbars.is_empty() {
+            return;
+        }
+
+        // <https://drafts.csswg.org/css-scrollbars-1/#scrollbar-color>
+        let current_color = style.get_inherited_text().slow_clone_color();
+        let (thumb_color, track_color) = match &style.get_inherited_ui().scrollbar_color {
+            ScrollbarColor::Colors { thumb, track } => (
+                rgba(thumb.resolve_to_absolute(&current_color)),
+                rgba(track.resolve_to_absolute(&current_color)),
+            ),
+            ScrollbarColor::Auto => (DEFAULT_SCROLLBAR_THUMB_COLOR, DEFAULT_SCROLLBAR_TRACK_COLOR),
+        };
+
+        let scroll_node_info = fragment
+            .generated_scroll_tree_node_id()
+            .and_then(|id| match &self.paint_info.scroll_tree.get_node(id).info {
+                SpatialTreeNodeInfo::Scroll(info) => Some(info.clone()),
+                _ => None,
+            });
+
+        for scrollbar in &scrollbars {
+            let track = scrollbar.track.to_webrender();
+            let common = self.common_properties(state, track, style);
+            self.wr().push_rect(&common, track, track_color);
+
+            let Some(thumb) = scrollbar.thumb else {
+                continue;
+            };
+            let thumb = thumb.to_webrender();
+            // The thumb sits in a reference frame whose transform the painter updates as
+            // the scroll frame scrolls (see `ScrollbarThumb`).
+            let mut common = self.common_properties(state, thumb, style);
+            if let Some(transform) = scroll_node_info
+                .as_ref()
+                .and_then(|info| info.scrollbar_thumb_transform(scrollbar.vertical))
+            {
+                common.spatial_id = self.wr().push_reference_frame(
+                    LayoutPoint::zero(),
+                    common.spatial_id,
+                    TransformStyle::Flat,
+                    PropertyBinding::Binding(transform.key, transform.value),
+                    wr::ReferenceFrameKind::Transform {
+                        is_2d_scale_translation: true,
+                        should_snap: false,
+                        paired_with_perspective: false,
+                    },
+                );
+                self.wr().pop_reference_frame();
+            }
+            self.wr().push_rect(&common, thumb, thumb_color);
+        }
+
+        if let Some(corner) = corner {
+            let corner = corner.to_webrender();
+            let common = self.common_properties(state, corner, style);
+            self.wr().push_rect(&common, corner, track_color);
+        }
     }
 
     fn visit_box_for_collapsed_table_borders(
@@ -2496,6 +2565,22 @@ impl<'a> BuilderForBoxFragment<'a> {
         }
     }
 }
+
+/// The colour of the thumb of a classic scrollbar with `scrollbar-color: auto`.
+const DEFAULT_SCROLLBAR_THUMB_COLOR: wr::ColorF = wr::ColorF {
+    r: 0.757,
+    g: 0.757,
+    b: 0.757,
+    a: 1.0,
+};
+
+/// The colour of the track of a classic scrollbar with `scrollbar-color: auto`.
+const DEFAULT_SCROLLBAR_TRACK_COLOR: wr::ColorF = wr::ColorF {
+    r: 0.945,
+    g: 0.945,
+    b: 0.945,
+    a: 1.0,
+};
 
 fn rgba(color: AbsoluteColor) -> wr::ColorF {
     let rgba = color.to_color_space(ColorSpace::Srgb);
