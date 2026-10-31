@@ -510,6 +510,16 @@ impl TaffyContainer {
                     .map(Au::from_f32_px),
                 );
 
+                // Taffy's padding for an item does not include the scrollbar gutter of a
+                // scroll container, which is taken out of its content box.
+                let scrollbar_gutter = match &child.taffy_level_box {
+                    TaffyItemBoxInner::InFlowBox(independent_box) => {
+                        independent_box.base.scrollbar_gutter()
+                    },
+                    TaffyItemBoxInner::OutOfFlowAbsolutelyPositionedBox(_) => PhysicalSides::zero(),
+                };
+                let content_size = content_size.inner_rect(scrollbar_gutter);
+
                 let child_specific_layout_info: Option<SpecificLayoutInfo> =
                     std::mem::take(&mut container_ctx.child_specific_layout_infos[child_id]);
 
@@ -524,11 +534,12 @@ impl TaffyContainer {
                             independent_box.style().clone(),
                             std::mem::take(&mut child.child_fragments),
                             content_size,
-                            padding,
+                            padding + scrollbar_gutter,
                             border,
                             margin,
                             child_specific_layout_info,
                         )
+                        .with_scrollbar_gutter(scrollbar_gutter)
                         .with_baselines(Baselines {
                             first: child.taffy_baselines.first.map(|baseline| {
                                 Au::from_f32_px(baseline) - padding.top - border.top
@@ -588,6 +599,9 @@ impl TaffyContainer {
                 if let TaffyItemBoxInner::InFlowBox(independent_formatting_context) =
                     &child.taffy_level_box
                 {
+                    independent_formatting_context
+                        .base
+                        .update_overflowing_auto_axes(container_ctx.layout_context, &fragment);
                     independent_formatting_context
                         .base
                         .set_fragment(fragment.clone());

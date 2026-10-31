@@ -29,6 +29,7 @@ mod positioned;
 mod query;
 mod quotes;
 mod replaced;
+mod scrollbars;
 mod sizing;
 mod style_ext;
 pub mod table;

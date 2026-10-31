@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use euclid::Size2D;
 use fonts::FontContext;
@@ -61,9 +62,39 @@ pub(crate) struct LayoutContext<'a> {
 
     /// The device dimensions on which this layout is running, in device pixels.
     pub device_size: Size2D<f32, DevicePixel>,
+
+    /// Set during layout when an `overflow: auto` scroll container starts or stops
+    /// overflowing in some axis, so that it shows or hides a classic scrollbar. Its
+    /// scrollbar gutter then changes the size of its content box, so layout is run again.
+    pub auto_scrollbars_changed: AtomicBool,
+
+    /// Non-zero during a layout pass that must not reuse layout results cached before
+    /// it: the pass that follows a change of `auto_scrollbars_changed`, since the cached
+    /// results of the ancestors of that scroll container still hold its previous
+    /// fragment. Each such pass gets its own epoch; a box drops its caches the first
+    /// time it is laid out in it (see `LayoutBoxBase::drop_caches_from_earlier_passes`).
+    pub fresh_cache_epoch: AtomicU32,
 }
 
+/// The source of [`LayoutContext::fresh_cache_epoch`] values, unique in the process.
+static NEXT_FRESH_CACHE_EPOCH: AtomicU32 = AtomicU32::new(1);
+
 impl LayoutContext<'_> {
+    /// See [`Self::fresh_cache_epoch`].
+    pub(crate) fn fresh_cache_epoch(&self) -> u32 {
+        self.fresh_cache_epoch.load(Ordering::Relaxed)
+    }
+
+    /// Start a layout pass that does not reuse layout results cached before it.
+    pub(crate) fn start_pass_with_fresh_caches(&self) {
+        let mut epoch = NEXT_FRESH_CACHE_EPOCH.fetch_add(1, Ordering::Relaxed);
+        if epoch == 0 {
+            epoch = NEXT_FRESH_CACHE_EPOCH.fetch_add(1, Ordering::Relaxed);
+        }
+        self.fresh_cache_epoch.store(epoch, Ordering::Relaxed);
+        self.auto_scrollbars_changed.store(false, Ordering::Relaxed);
+    }
+
     pub(crate) fn should_parallelize(&self, number_of_jobs: usize) -> bool {
         self.allow_parallel_layout && number_of_jobs >= self.parallelism_job_count_minimum
     }

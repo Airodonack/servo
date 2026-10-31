@@ -31,6 +31,7 @@ use crate::geom::{
     AuOrAuto, LengthPercentageOrAuto, PhysicalPoint, PhysicalRect, PhysicalSides,
     SyncPhysicalRectAu, ToLogical,
 };
+use crate::scrollbars::ScrollbarAxes;
 use crate::style_ext::ComputedValuesExt;
 use crate::table::SpecificTableGridInfo;
 use crate::taffy::SpecificTaffyGridInfo;
@@ -129,6 +130,12 @@ pub(crate) struct BoxFragment {
     pub border: PhysicalSides<Au>,
     pub margin: PhysicalSides<Au>,
 
+    /// The space taken by the classic scrollbars of a scroll container, between its inner
+    /// border edge and its outer padding edge (its scrollbar gutter). Not part of
+    /// `padding`, so [`Self::padding_rect`] is the scrollport.
+    /// <https://drafts.csswg.org/css-overflow-3/#scrollbar-gutter-property>
+    pub scrollbar_gutter: PhysicalSides<Au>,
+
     /// When this [`BoxFragment`] is for content that has a baseline, this tracks
     /// the first and last baselines of that content. This is used to propagate baselines
     /// to things such as tables and inline formatting contexts.
@@ -177,6 +184,7 @@ impl BoxFragment {
             padding,
             border,
             margin,
+            scrollbar_gutter: PhysicalSides::zero(),
             baselines: Baselines::default(),
             scrollable_overflow: Default::default(),
             scrollable_overflow_is_up_to_date: AtomicBool::new(false),
@@ -185,6 +193,14 @@ impl BoxFragment {
             block_level_layout_info: None,
             spatial_tree_node: AtomicOptionScrollTreeNodeId::new(None),
         }
+    }
+
+    /// Set the scrollbar gutter of this scroll container. Layout gives it to a fragment
+    /// as part of its padding (see `PaddingBorderMargin::padding`); this takes it out.
+    pub(crate) fn with_scrollbar_gutter(mut self, scrollbar_gutter: PhysicalSides<Au>) -> Self {
+        self.padding -= scrollbar_gutter;
+        self.scrollbar_gutter = scrollbar_gutter;
+        self
     }
 
     pub(crate) fn with_baselines(mut self, baselines: Baselines) -> Self {
@@ -226,7 +242,7 @@ impl BoxFragment {
         // and ignore anything that is set via [`Self::with_baselines`].
         if style.establishes_scroll_container(self.base.flags) {
             let content_rect_size = self.content_rect().size.to_logical(writing_mode);
-            let padding = self.padding.to_logical(writing_mode);
+            let padding = (self.padding + self.scrollbar_gutter).to_logical(writing_mode);
             let border = self.border.to_logical(writing_mode);
             let margin = self.margin.to_logical(writing_mode);
             baselines.last = Some(
@@ -365,7 +381,9 @@ impl BoxFragment {
     }
 
     pub(crate) fn border_rect(&self) -> PhysicalRect<Au> {
-        self.padding_rect().outer_rect(self.border)
+        self.padding_rect()
+            .outer_rect(self.scrollbar_gutter)
+            .outer_rect(self.border)
     }
 
     pub(crate) fn margin_rect(&self) -> PhysicalRect<Au> {
@@ -373,7 +391,7 @@ impl BoxFragment {
     }
 
     pub(crate) fn padding_border_margin(&self) -> PhysicalSides<Au> {
-        self.margin + self.border + self.padding
+        self.margin + self.border + self.scrollbar_gutter + self.padding
     }
 
     pub(crate) fn is_root_element(&self) -> bool {
@@ -666,6 +684,24 @@ impl<'a> BoxFragmentWithStyle<'a> {
             rect
         }
     }
+
+    /// The axes in which the content of this scroll container overflows its scrollport,
+    /// that is, in which it can be scrolled.
+    pub(crate) fn overflowing_axes(&self) -> ScrollbarAxes {
+        let scrollport = self.padding_rect();
+        let scrollable_overflow = self.calculate_scrollable_overflow();
+        let mut axes = ScrollbarAxes::empty();
+        axes.set(
+            ScrollbarAxes::VERTICAL,
+            scrollable_overflow.size.height > scrollport.size.height,
+        );
+        axes.set(
+            ScrollbarAxes::HORIZONTAL,
+            scrollable_overflow.size.width > scrollport.size.width,
+        );
+        axes
+    }
+
     /// This is an implementation of:
     /// - <https://drafts.csswg.org/css-overflow-3/#scrollable>.
     /// - <https://drafts.csswg.org/cssom-view/#scrolling-area>

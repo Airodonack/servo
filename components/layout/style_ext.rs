@@ -40,7 +40,7 @@ use crate::dom_traversal::{Contents, NodeAndStyleInfo};
 use crate::fragment_tree::FragmentFlags;
 use crate::geom::{
     AuOrAuto, LengthPercentageOrAuto, LogicalSides, LogicalSides1D, LogicalVec2, PhysicalSides,
-    PhysicalSize,
+    PhysicalSize, ToLogical,
 };
 use crate::sizing::{Size, Sizes};
 use crate::table::TableLayoutStyle;
@@ -165,9 +165,16 @@ impl DisplayLayoutInternal {
 /// Percentages resolved but not `auto` margins
 #[derive(Clone, Debug)]
 pub(crate) struct PaddingBorderMargin {
+    /// The padding, including the scrollbar gutter of a scroll container (which sits
+    /// between the inner border edge and the outer padding edge), so that the content box
+    /// is placed and sized as if it was padding.
     pub padding: LogicalSides<Au>,
     pub border: LogicalSides<Au>,
     pub margin: LogicalSides<AuOrAuto>,
+
+    /// The scrollbar gutter of a scroll container, also included in `padding`.
+    /// <https://drafts.csswg.org/css-overflow-3/#scrollbar-gutter-property>
+    pub scrollbar_gutter: LogicalSides<Au>,
 
     /// Pre-computed sums in each axis
     pub padding_border_sums: LogicalVec2<Au>,
@@ -179,6 +186,7 @@ impl PaddingBorderMargin {
             padding: LogicalSides::zero(),
             border: LogicalSides::zero(),
             margin: LogicalSides::zero(),
+            scrollbar_gutter: LogicalSides::zero(),
             padding_border_sums: LogicalVec2::zero(),
         }
     }
@@ -457,7 +465,11 @@ impl ComputedValuesExt for ComputedValues {
         pbm: &PaddingBorderMargin,
     ) -> LogicalVec2<Size<Au>> {
         match self.get_position().box_sizing {
-            BoxSizing::ContentBox => box_size,
+            // The scrollbar gutter is taken out of the content box.
+            BoxSizing::ContentBox => box_size.map_inline_and_block_sizes(
+                |value| value - pbm.scrollbar_gutter.inline_sum(),
+                |value| value - pbm.scrollbar_gutter.block_sum(),
+            ),
             // These may be negative, but will later be clamped by `min-width`/`min-height`
             // which is clamped to zero.
             BoxSizing::BorderBox => box_size.map_inline_and_block_sizes(
@@ -473,7 +485,10 @@ impl ComputedValuesExt for ComputedValues {
         pbm: &PaddingBorderMargin,
     ) -> LogicalVec2<Size<Au>> {
         match self.get_position().box_sizing {
-            BoxSizing::ContentBox => min_box_size,
+            BoxSizing::ContentBox => min_box_size.map_inline_and_block_sizes(
+                |value| Au::zero().max(value - pbm.scrollbar_gutter.inline_sum()),
+                |value| Au::zero().max(value - pbm.scrollbar_gutter.block_sum()),
+            ),
             // Clamp to zero to make sure the used size components are non-negative
             BoxSizing::BorderBox => min_box_size.map_inline_and_block_sizes(
                 |value| Au::zero().max(value - pbm.padding_border_sums.inline),
@@ -488,7 +503,10 @@ impl ComputedValuesExt for ComputedValues {
         pbm: &PaddingBorderMargin,
     ) -> LogicalVec2<Size<Au>> {
         match self.get_position().box_sizing {
-            BoxSizing::ContentBox => max_box_size,
+            BoxSizing::ContentBox => max_box_size.map_inline_and_block_sizes(
+                |value| value - pbm.scrollbar_gutter.inline_sum(),
+                |value| value - pbm.scrollbar_gutter.block_sum(),
+            ),
             // This may be negative, but will later be clamped by `min-width`
             // which itself is clamped to zero.
             BoxSizing::BorderBox => max_box_size.map_inline_and_block_sizes(
@@ -1115,13 +1133,16 @@ impl ComputedValuesExt for ComputedValues {
 pub(crate) enum LayoutStyle<'a> {
     Default(&'a ComputedValues),
     Table(TableLayoutStyle<'a>),
+    /// A scroll container whose classic scrollbars take this much space on each side
+    /// (its scrollbar gutter).
+    ScrollContainer(&'a ComputedValues, PhysicalSides<Au>),
 }
 
 impl LayoutStyle<'_> {
     #[inline]
     pub(crate) fn style(&self) -> &ComputedValues {
         match self {
-            Self::Default(style) => style,
+            Self::Default(style) | Self::ScrollContainer(style, _) => style,
             Self::Table(table) => table.style(),
         }
     }
@@ -1224,6 +1245,11 @@ impl LayoutStyle<'_> {
         let margin = style
             .margin(writing_mode)
             .percentages_relative_to(containing_block_inline_size);
+        let scrollbar_gutter = match self {
+            Self::ScrollContainer(_, gutter) => gutter.to_logical(writing_mode),
+            _ => LogicalSides::zero(),
+        };
+        let padding = padding + scrollbar_gutter;
         PaddingBorderMargin {
             padding_border_sums: LogicalVec2 {
                 inline: padding.inline_sum() + border.inline_sum(),
@@ -1232,6 +1258,7 @@ impl LayoutStyle<'_> {
             padding,
             border,
             margin,
+            scrollbar_gutter,
         }
     }
 

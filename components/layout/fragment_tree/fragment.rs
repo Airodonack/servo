@@ -328,8 +328,12 @@ impl Fragment {
             rect.origin = PhysicalPoint::zero();
             rect
         } else {
+            // The client area is the padding box, which is inside any scrollbar gutter.
             let mut rect = fragment.padding_rect();
-            rect.origin = PhysicalPoint::new(fragment.border.left, fragment.border.top);
+            rect.origin = PhysicalPoint::new(
+                fragment.border.left + fragment.scrollbar_gutter.left,
+                fragment.border.top + fragment.scrollbar_gutter.top,
+            );
             rect
         };
 
