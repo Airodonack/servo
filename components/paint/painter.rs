@@ -19,7 +19,7 @@ use image::RgbaImage;
 use log::{debug, error, info, warn};
 use media::WindowGLContext;
 use paint_api::display_list::{
-    PaintDisplayListInfo, PaintTimingInfo, PaintTimingReport, ScrollType,
+    PaintDisplayListInfo, PaintTimingInfo, PaintTimingReport, ScrollType, SpatialTreeNodeInfo,
 };
 use paint_api::rendering_context::RenderingContext;
 use paint_api::viewport_description::ViewportDescription;
@@ -657,6 +657,18 @@ impl Painter {
                 })
             })
             .collect();
+        // The thumbs of classic scrollbars are placed by transforms that follow the
+        // current scroll offsets; WebRender replaces all dynamic properties at once.
+        let mut transforms = transforms;
+        for webview_renderer in self.webview_renderers.values() {
+            for details in webview_renderer.pipelines.values() {
+                for node in details.scroll_tree.nodes.iter() {
+                    if let SpatialTreeNodeInfo::Scroll(info) = &node.info {
+                        transforms.extend(info.scrollbar_thumb_transforms());
+                    }
+                }
+            }
+        }
         transaction.append_dynamic_properties(DynamicProperties {
             transforms,
             floats: Vec::new(),
@@ -789,9 +801,6 @@ impl Painter {
         }
 
         let mut transaction = Transaction::new();
-        if dynamic_properties_updated {
-            self.add_dynamic_properties_to_transaction(&mut transaction);
-        }
 
         for update in scroll_offset_updates {
             transaction.set_scroll_offsets(
@@ -802,6 +811,8 @@ impl Painter {
                 }],
             );
         }
+        // Scrolling moves scrollbar thumbs, so the dynamic properties are sent either way.
+        self.add_dynamic_properties_to_transaction(&mut transaction);
 
         self.generate_frame(
             &mut transaction,
@@ -985,6 +996,7 @@ impl Painter {
                 generation: 0,
             }],
         );
+        self.add_dynamic_properties_to_transaction(&mut transaction);
 
         self.generate_frame(&mut transaction, RenderReasons::APZ);
         self.send_transaction(transaction);
@@ -1106,6 +1118,8 @@ impl Painter {
         transaction.set_display_list(epoch, (pipeline_id, built_display_list));
 
         self.update_transaction_with_all_scroll_offsets(&mut transaction);
+        // The new display list may bind new scrollbar thumb transforms, which need values.
+        self.add_dynamic_properties_to_transaction(&mut transaction);
         self.send_transaction(transaction);
     }
 
