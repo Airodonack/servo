@@ -89,15 +89,15 @@ use app_units::{Au, MAX_AU};
 use atomic_refcell::AtomicRef;
 use bitflags::bitflags;
 use construct::InlineFormattingContextBuilder;
-use fonts::{FontMetrics, FontRef, ShapedTextSlice};
+use fonts::{FontMetrics, FontRef, ShapedTextSlice, ShapedTextSliceType, ShapedTextSlicer};
 use icu_locale_core::LanguageIdentifier;
 use icu_properties::props::{EnumeratedProperty, LineBreak as ICULineBreak};
 use icu_segmenter::options::{LineBreakOptions, LineBreakStrictness, LineBreakWordOption};
 use inline_box::{InlineBox, InlineBoxContainerState, InlineBoxIdentifier, InlineBoxes};
 use layout_api::LayoutNode;
 use line::{
-    AbsolutelyPositionedLineItem, AtomicLineItem, FloatLineItem, LineItem, LineItemLayout,
-    TextRunLineItem,
+    AbsolutelyPositionedLineItem, AtomicLineItem, FloatLineItem, LineEllipsis, LineItem,
+    LineItemLayout, TextRunLineItem,
 };
 use malloc_size_of_derive::MallocSizeOf;
 use script::layout_dom::ServoLayoutNode;
@@ -115,8 +115,8 @@ use style::values::computed::BaselineShift;
 use style::values::generics::box_::BaselineShiftKeyword;
 use style::values::generics::font::LineHeight;
 use style::values::specified::box_::BaselineSource;
-use style::values::specified::text::TextAlignKeyword;
-use style::values::specified::{AlignmentBaseline, TextAlignLast, TextJustify};
+use style::values::specified::text::{TextAlignKeyword, TextOverflowSide};
+use style::values::specified::{AlignmentBaseline, Overflow, TextAlignLast, TextJustify};
 use text_run::{TextRun, get_font_for_first_font_for_style};
 use unicode_bidi::{BidiInfo, Level};
 
@@ -129,14 +129,16 @@ use crate::dom_traversal::NodeAndStyleInfo;
 use crate::flow::float::{FloatBox, SequentialLayoutState};
 use crate::flow::inline::shaping_queue::ShapingQueue;
 use crate::flow::inline::text_run::{
-    CaretPlaceholder, FontAndScriptInfo, TextRunItem, TextRunSegment,
+    CaretPlaceholder, FontAndScriptInfo, SharedTextRunData, TextRunItem, TextRunSegment,
 };
 use crate::flow::{
     BlockLevelBox, CollapsibleWithParentStartMargin, FloatSide, PlacementState,
     compute_inline_content_sizes_for_block_level_boxes, layout_block_level_child,
 };
 use crate::formatting_contexts::{Baselines, IndependentFormattingContext};
-use crate::fragment_tree::{CollapsedMargin, Fragment, FragmentFlags, PositioningFragment};
+use crate::fragment_tree::{
+    BaseFragmentInfo, CollapsedMargin, Fragment, FragmentFlags, PositioningFragment,
+};
 use crate::geom::{LogicalRect, LogicalSides1D, LogicalVec2, ToLogical};
 use crate::layout_box_base::LayoutBoxBase;
 use crate::positioned::{AbsolutelyPositionedBox, PositioningContext};
@@ -1125,6 +1127,7 @@ impl InlineFormattingContextLayout<'_> {
                 whitespace_trimmed,
                 last_line_or_forced_line_break,
             );
+        let ellipsis = self.ellipsis_for_current_line(inline_start_position, whitespace_trimmed);
 
         // https://drafts.csswg.org/css-inline-3/#invisible-line-boxes
         // > Line boxes that contain no text, no preserved white space, no inline boxes with non-zero
@@ -1222,6 +1225,7 @@ impl InlineFormattingContextLayout<'_> {
             justification_adjustment,
             is_phantom_line,
             line_to_layout.for_block_level,
+            ellipsis,
         );
 
         if !is_phantom_line {
@@ -1280,6 +1284,104 @@ impl InlineFormattingContextLayout<'_> {
     /// the `text-align` property, calculate where the line under construction starts in
     /// the inline axis as well as the adjustment needed for every justification opportunity
     /// to account for `text-align: justify`.
+    /// The start and the inline size of the line box of the current line, relative to the
+    /// containing block, taking into account any floats that shorten it.
+    fn current_line_box_start_and_inline_size(&self) -> (Au, Au) {
+        match self.current_line.placement_among_floats.get() {
+            Some(placement_among_floats) => (
+                placement_among_floats.start_corner.inline,
+                placement_among_floats.size.inline,
+            ),
+            None => (Au::zero(), self.containing_block().size.inline),
+        }
+    }
+
+    /// The `text-overflow` ellipsis for the current line, if its content overflows the end
+    /// edge of the line box and the block container asks for one:
+    /// <https://drafts.csswg.org/css-overflow-4/#text-overflow>
+    ///
+    /// > This property specifies rendering when inline content overflows its end line box
+    /// > edge in the inline progression direction of its block container element ("the
+    /// > block") that has overflow other than visible.
+    fn ellipsis_for_current_line(
+        &self,
+        inline_start_position: Au,
+        whitespace_trimmed: Au,
+    ) -> Option<LineEllipsis> {
+        if self.current_line.for_block_level || self.ifc.is_single_line_text_input {
+            return None;
+        }
+
+        let style = self.containing_block().style;
+        let writing_mode = style.writing_mode;
+        let overflow = style.effective_overflow(FragmentFlags::empty());
+        let inline_axis_overflow = if writing_mode.is_horizontal() {
+            overflow.x
+        } else {
+            overflow.y
+        };
+        if inline_axis_overflow == Overflow::Visible {
+            return None;
+        }
+
+        // > If there is one value, it applies only to the end line box edge. If there are
+        // > two values, the first value applies to the line-left edge, and the second value
+        // > applies to the line-right edge.
+        let text_overflow = style.clone_text_overflow();
+        let end_side =
+            if text_overflow.sides_are_logical || writing_mode.line_left_is_inline_start() {
+                &text_overflow.second
+            } else {
+                &text_overflow.first
+            };
+        let ellipsis_string = match end_side {
+            TextOverflowSide::Clip => return None,
+            TextOverflowSide::Ellipsis => "\u{2026}",
+            TextOverflowSide::String(string) => &**string,
+        };
+
+        let (line_box_start, line_box_inline_size) = self.current_line_box_start_and_inline_size();
+        let line_box_end = line_box_start + line_box_inline_size;
+        let text_indent = self.current_line.start_position.inline;
+        let content_end = inline_start_position + self.current_line.inline_position -
+            whitespace_trimmed -
+            text_indent;
+        if content_end <= line_box_end {
+            return None;
+        }
+
+        let font = self.ifc.default_font.clone()?;
+        let info = FontAndScriptInfo::simple_for_font(font.clone());
+        let shaped_text = font.shape_text(ellipsis_string, &(&info).into());
+        let slice = ShapedTextSlicer::new(shaped_text).slice_until_character_offset(
+            Utf32CodeUnits(ellipsis_string.chars().count() as u32),
+            ShapedTextSliceType::Word,
+        );
+        let ellipsis_inline_size = slice
+            .as_ref()
+            .map_or(Au::zero(), |slice| slice.total_advance());
+
+        Some(LineEllipsis {
+            cutoff: line_box_end - ellipsis_inline_size,
+            text: TextRunLineItem {
+                text_fragment_run_data: Arc::new(SharedTextRunData {
+                    text_content: self.ifc.text_content.clone(),
+                    inline_styles: self.ifc.shared_inline_styles.clone(),
+                    character_range_in_ifc_text: Utf32CodeUnits(0)..Utf32CodeUnits(0),
+                    original_offset: Utf32CodeUnits(0),
+                    selection: Default::default(),
+                    paint_caret: false,
+                    offset_map: Default::default(),
+                }),
+                info,
+                base_fragment_info: BaseFragmentInfo::anonymous(),
+                text: slice.into_iter().collect(),
+                character_range_in_dom_node: Utf32CodeUnits(0)..Utf32CodeUnits(0),
+                is_empty_for_text_cursor: false,
+            },
+        })
+    }
+
     fn calculate_current_line_inline_start_and_justification_adjustment(
         &self,
         whitespace_trimmed: Au,
@@ -1330,13 +1432,7 @@ impl InlineFormattingContextLayout<'_> {
             TextAlignKeyword::Justify => TextAlign::Start,
         };
 
-        let (line_start, available_space) = match self.current_line.placement_among_floats.get() {
-            Some(placement_among_floats) => (
-                placement_among_floats.start_corner.inline,
-                placement_among_floats.size.inline,
-            ),
-            None => (Au::zero(), containing_block.size.inline),
-        };
+        let (line_start, available_space) = self.current_line_box_start_and_inline_size();
 
         // Properly handling text-indent requires that we do not align the text
         // into the text-indent.
