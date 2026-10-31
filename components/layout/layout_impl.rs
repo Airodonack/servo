@@ -8,7 +8,7 @@ use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::AtomicU32;
 use std::sync::{Arc, LazyLock};
 
 use accesskit::ActionRequest;
@@ -1285,7 +1285,7 @@ impl LayoutThread {
             parallelism_job_count_minimum: pref!(layout_parallelism_job_count_minimum) as usize,
             parallelism_job_size_minimum: pref!(layout_parallelism_job_size_minimum) as usize,
             device_size: reflow_request.viewport_details.device_size.cast_unit(),
-            auto_scrollbars_changed: AtomicBool::new(false),
+            scrollbar_observations: Default::default(),
             fresh_cache_epoch: AtomicU32::new(0),
         };
 
@@ -1367,6 +1367,7 @@ impl LayoutThread {
             }
         };
 
+        let mut scrollbars_changed = false;
         if !damage.contains(LayoutDamage::Relayout) {
             if damage.contains(LayoutDamage::RecalculateOverflow) {
                 assert!(self.need_new_display_list.get());
@@ -1393,13 +1394,11 @@ impl LayoutThread {
                 insert_accessibility_damage_if_necessary(layout_root.node());
             }
 
-            if layout_roots
+            let layout_roots_succeeded = layout_roots
                 .iter()
-                .all(|layout_root| layout_root.try_layout(&layout_context)) &&
-                !layout_context
-                    .auto_scrollbars_changed
-                    .load(Ordering::Relaxed)
-            {
+                .all(|layout_root| layout_root.try_layout(&layout_context));
+            scrollbars_changed = layout_context.apply_scrollbar_observations();
+            if layout_roots_succeeded && !scrollbars_changed {
                 return (
                     ReflowPhasesRun::RanLayout,
                     std::mem::take(&mut *layout_context.iframe_sizes.lock()),
@@ -1438,23 +1437,19 @@ impl LayoutThread {
         // content overflows, and the scrollbar's gutter narrows (or shortens) its content
         // box, so finding out that it does means laying out again. Layout records what it
         // found in each box, so later layouts start from it and usually need one pass.
-        if layout_context
-            .auto_scrollbars_changed
-            .load(Ordering::Relaxed)
-        {
+        if scrollbars_changed {
             layout_context.start_pass_with_fresh_caches();
         }
         let mut fragment_tree = run_layout();
         for _ in 0..MAX_EXTRA_LAYOUT_PASSES_FOR_SCROLLBARS {
-            if !layout_context
-                .auto_scrollbars_changed
-                .load(Ordering::Relaxed)
-            {
+            if !layout_context.apply_scrollbar_observations() {
                 break;
             }
             layout_context.start_pass_with_fresh_caches();
             fragment_tree = run_layout();
         }
+        // What the last pass found is used by the next layout.
+        layout_context.apply_scrollbar_observations();
         let fragment_tree = Rc::new(fragment_tree);
 
         *self.fragment_tree.borrow_mut() = Some(fragment_tree);

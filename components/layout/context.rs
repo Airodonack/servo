@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use euclid::Size2D;
 use fonts::FontContext;
@@ -29,6 +29,8 @@ use style_traits::DevicePixel;
 use uuid::Uuid;
 use webrender_api::ImageKey;
 use webrender_api::units::{DeviceIntSize, DeviceSize};
+
+use crate::scrollbars::AutoScrollbarState;
 
 pub(crate) type CachedImageOrError = Result<CachedImage, ResolveImageError>;
 
@@ -63,13 +65,15 @@ pub(crate) struct LayoutContext<'a> {
     /// The device dimensions on which this layout is running, in device pixels.
     pub device_size: Size2D<f32, DevicePixel>,
 
-    /// Set during layout when an `overflow: auto` scroll container starts or stops
-    /// overflowing in some axis, so that it shows or hides a classic scrollbar. Its
-    /// scrollbar gutter then changes the size of its content box, so layout is run again.
-    pub auto_scrollbars_changed: AtomicBool,
+    /// The scrollbar states of the `overflow: auto` scroll containers whose layout in
+    /// this pass found their content overflowing in other axes than they were laid out
+    /// with. Applied after the pass by [`Self::apply_scrollbar_observations`]; a box that
+    /// shows or hides a classic scrollbar gains or loses its gutter, which changes the
+    /// size of its content box, so layout is then run again.
+    pub scrollbar_observations: Mutex<Vec<Arc<AutoScrollbarState>>>,
 
     /// Non-zero during a layout pass that must not reuse layout results cached before
-    /// it: the pass that follows a change of `auto_scrollbars_changed`, since the cached
+    /// it: the pass that follows a change of scrollbars, since the cached
     /// results of the ancestors of that scroll container still hold its previous
     /// fragment. Each such pass gets its own epoch; a box drops its caches the first
     /// time it is laid out in it (see `LayoutBoxBase::drop_caches_from_earlier_passes`).
@@ -92,7 +96,25 @@ impl LayoutContext<'_> {
             epoch = NEXT_FRESH_CACHE_EPOCH.fetch_add(1, Ordering::Relaxed);
         }
         self.fresh_cache_epoch.store(epoch, Ordering::Relaxed);
-        self.auto_scrollbars_changed.store(false, Ordering::Relaxed);
+    }
+
+    /// Record that a layout of a box found its `overflow: auto` content overflowing in
+    /// other axes than it was laid out with (see [`AutoScrollbarState`]).
+    pub(crate) fn register_scrollbar_observation(&self, state: Arc<AutoScrollbarState>) {
+        self.scrollbar_observations.lock().push(state);
+    }
+
+    /// After a layout pass, make the scrollbars that the last layout of each box found
+    /// current. Returns true if some box now shows or hides a classic scrollbar, so
+    /// that layout has to run again.
+    pub(crate) fn apply_scrollbar_observations(&self) -> bool {
+        let observations = std::mem::take(&mut *self.scrollbar_observations.lock());
+        // Every state is applied, not only up to the first that changed.
+        let mut changed = false;
+        for state in &observations {
+            changed |= state.apply();
+        }
+        changed
     }
 
     pub(crate) fn should_parallelize(&self, number_of_jobs: usize) -> bool {
