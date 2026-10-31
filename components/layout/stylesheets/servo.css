@@ -255,17 +255,21 @@ input[type="range"]:active::slider-track {
   background: gainsboro;
 }
 
+/* `-servo-accent-color` is the input's `accent-color`, or `currentcolor` (the `color` set
+   here) when that is `auto`. */
 input[type="range"]::slider-fill {
   height: 4px;
-  background-color: #007aff;
-  border-color: #007aff;
+  color: #007aff;
+  background-color: -servo-accent-color;
+  border-color: -servo-accent-color;
 }
 
 input[type="range"]::slider-thumb {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: #007aff;
+  color: #007aff;
+  background: -servo-accent-color;
 
   /* The thumb is placed by setting `inset-inline-start` to the value's position within the
      input's padding box. Adjust inline direction by width so thumb is centered on range value. */
@@ -332,6 +336,11 @@ input[type="checkbox"]:checked::before {
   content: "✔";
 }
 
+/* The check takes the input's `accent-color`, or keeps its `color` when that is `auto`. */
+input[type="checkbox"]:checked:enabled::before {
+  color: -servo-accent-color;
+}
+
 input[type="checkbox"]:indeterminate::before {
   content: "—";
 }
@@ -389,8 +398,10 @@ input[type="radio"]::after {
   border-radius: 50%;
 }
 
+/* The bullet takes the input's `accent-color`, or black when that is `auto`. */
 input[type="radio"]:checked::after {
-  background: black;
+  color: black;
+  background: -servo-accent-color;
 }
 
 input[type="radio"]:checked:disabled::after {
