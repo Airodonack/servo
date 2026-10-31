@@ -19,7 +19,7 @@ use image::RgbaImage;
 use log::{debug, error, info, warn};
 use media::WindowGLContext;
 use paint_api::display_list::{
-    PaintDisplayListInfo, PaintTimingInfo, PaintTimingReport, ScrollType,
+    PaintDisplayListInfo, PaintTimingInfo, PaintTimingReport, ScrollType, SpatialTreeNodeInfo,
 };
 use paint_api::rendering_context::RenderingContext;
 use paint_api::viewport_description::ViewportDescription;
@@ -53,8 +53,8 @@ use webrender_api::{
     DocumentId, DynamicProperties, Epoch as WebRenderEpoch, ExternalScrollId, FontInstanceFlags,
     FontInstanceKey, FontInstanceOptions, FontInstancePlatformOptions, FontKey, FontVariation,
     ImageData, ImageKey, NativeFontHandle, PipelineId as WebRenderPipelineId, PropertyBinding,
-    ReferenceFrameKind, RenderReasons, SampledScrollOffset, SpaceAndClipInfo, SpatialId,
-    TransformStyle,
+    PropertyValue, ReferenceFrameKind, RenderReasons, SampledScrollOffset, SpaceAndClipInfo,
+    SpatialId, TransformStyle,
 };
 use wr_malloc_size_of::MallocSizeOfOps;
 
@@ -133,6 +133,10 @@ pub(crate) struct Painter {
     /// A [`WebContentAnimator`] used to manage web content-derived animations. Currently this only
     /// manages blinking caret animations.
     web_content_animator: WebContentAnimator,
+
+    /// The colours last given to blinking carets. WebRender replaces all dynamic property
+    /// values at once, so these are sent again whenever scrollbar thumbs move.
+    caret_colors: Vec<PropertyValue<ColorF>>,
 }
 
 impl Drop for Painter {
@@ -295,6 +299,7 @@ impl Painter {
                 paint.event_loop_waker.clone_box(),
                 (*timer_refresh_driver).clone(),
             ),
+            caret_colors: Vec::new(),
         };
         painter.assert_gl_framebuffer_complete();
         painter.clear_background();
@@ -317,13 +322,9 @@ impl Painter {
         self.send_zoom_and_scroll_offset_updates(need_zoom, scroll_offset_updates);
 
         if let Some(colors) = self.web_content_animator.update(&self.webview_renderers) {
+            self.caret_colors = colors;
             let mut transaction = Transaction::new();
-            transaction.reset_dynamic_properties();
-            transaction.append_dynamic_properties(DynamicProperties {
-                transforms: Vec::new(),
-                floats: Vec::new(),
-                colors,
-            });
+            self.update_transaction_with_dynamic_properties(&mut transaction);
             self.generate_frame(&mut transaction, RenderReasons::ANIMATED_PROPERTY);
             self.send_transaction(transaction);
         }
@@ -713,6 +714,29 @@ impl Painter {
     ///
     /// TODO(mrobinson): Could we only send offsets for the branch being modified
     /// and not the entire scene?
+    /// Give WebRender the values of all paint-side animated properties: the colour of
+    /// blinking carets and the transforms that place the thumbs of classic scrollbars for
+    /// the current scroll offsets. WebRender replaces all of them at once, so every update
+    /// of any of them sends them all.
+    fn update_transaction_with_dynamic_properties(&self, transaction: &mut Transaction) {
+        let mut transforms = Vec::new();
+        for webview_renderer in self.webview_renderers.values() {
+            for details in webview_renderer.pipelines.values() {
+                for node in details.scroll_tree.nodes.iter() {
+                    if let SpatialTreeNodeInfo::Scroll(info) = &node.info {
+                        transforms.extend(info.scrollbar_thumb_transforms());
+                    }
+                }
+            }
+        }
+        transaction.reset_dynamic_properties();
+        transaction.append_dynamic_properties(DynamicProperties {
+            transforms,
+            floats: Vec::new(),
+            colors: self.caret_colors.clone(),
+        });
+    }
+
     fn update_transaction_with_all_scroll_offsets(&self, transaction: &mut Transaction) {
         for webview_renderer in self.webview_renderers.values() {
             for details in webview_renderer.pipelines.values() {
@@ -735,6 +759,7 @@ impl Painter {
                 }
             }
         }
+        self.update_transaction_with_dynamic_properties(transaction);
     }
 
     fn send_zoom_and_scroll_offset_updates(
@@ -759,6 +784,7 @@ impl Painter {
                 }],
             );
         }
+        self.update_transaction_with_dynamic_properties(&mut transaction);
 
         self.generate_frame(&mut transaction, RenderReasons::APZ);
         self.send_transaction(transaction);
@@ -939,6 +965,7 @@ impl Painter {
                 generation: 0,
             }],
         );
+        self.update_transaction_with_dynamic_properties(&mut transaction);
 
         self.generate_frame(&mut transaction, RenderReasons::APZ);
         self.send_transaction(transaction);

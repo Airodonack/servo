@@ -12,7 +12,8 @@ use euclid::{Point2D, Rect, SideOffsets2D, Size2D};
 use malloc_size_of_derive::MallocSizeOf;
 use paint_api::display_list::{
     AxesScrollSensitivity, PaintDisplayListInfo, ReferenceFrameNodeInfo, ScrollType,
-    ScrollableNodeInfo, SpatialTreeNodeInfo, StickyNodeInfo, TouchAction,
+    ScrollableNodeInfo, ScrollbarThumb, ScrollbarThumbs, SpatialTreeNodeInfo, StickyNodeInfo,
+    TouchAction,
 };
 use servo_base::id::ScrollTreeNodeId;
 use servo_base::print_tree::PrintTree;
@@ -48,6 +49,7 @@ use crate::geom::{
     AuOrAuto, LengthPercentageOrAuto, PhysicalPoint, PhysicalRect, PhysicalSides, PhysicalSize,
     PhysicalVec,
 };
+use crate::scrollbars::{scrollbar_parts, thumb_transform_key};
 use crate::style_ext::{ComputedValuesExt, TransformExt};
 
 #[derive(Clone)]
@@ -237,6 +239,7 @@ impl StackingContextTree {
         )
     }
 
+    #[expect(clippy::too_many_arguments)]
     fn define_scroll_frame(
         &mut self,
         parent_scroll_node_id: ScrollTreeNodeId,
@@ -245,6 +248,7 @@ impl StackingContextTree {
         clip_rect: LayoutRect,
         scroll_sensitivity: AxesScrollSensitivity,
         touch_action: TouchAction,
+        scrollbar_thumbs: ScrollbarThumbs,
     ) -> ScrollTreeNodeId {
         self.paint_info.scroll_tree.add_scroll_tree_node(
             Some(parent_scroll_node_id),
@@ -256,6 +260,7 @@ impl StackingContextTree {
                 touch_action,
                 offset: LayoutVector2D::zero(),
                 offset_changed: Cell::new(false),
+                scrollbar_thumbs,
             }),
         )
     }
@@ -1075,6 +1080,25 @@ impl BoxFragmentWithStyle<'_> {
             y: y_sensitivity,
         };
 
+        // The painter moves the thumbs of the classic scrollbars of this scroll frame as it
+        // scrolls, so it needs to know about them.
+        let mut scrollbar_thumbs = ScrollbarThumbs::default();
+        let (scrollbars, _) = scrollbar_parts(self, containing_block_rect.origin);
+        for scrollbar in scrollbars
+            .iter()
+            .filter(|scrollbar| scrollbar.thumb.is_some())
+        {
+            let thumb = ScrollbarThumb {
+                transform_key: thumb_transform_key(external_scroll_id, scrollbar.vertical),
+                travel: scrollbar.travel.to_f32_px(),
+            };
+            if scrollbar.vertical {
+                scrollbar_thumbs.vertical = Some(thumb);
+            } else {
+                scrollbar_thumbs.horizontal = Some(thumb);
+            }
+        }
+
         let scroll_tree_node_id = stacking_context_tree.define_scroll_frame(
             parent_scroll_node_id,
             external_scroll_id,
@@ -1082,6 +1106,7 @@ impl BoxFragmentWithStyle<'_> {
             scroll_frame_rect,
             sensitivity,
             touch_action,
+            scrollbar_thumbs,
         );
 
         Some(OverflowFrameData {

@@ -16,11 +16,14 @@ use crate::fragment_tree::{
     BoxFragment, BoxFragmentWithStyle, Fragment, FragmentFlags, IFrameFragment, ImageFragment,
     PositioningFragment, Tag, TextFragment,
 };
-use crate::geom::{PhysicalPoint, PhysicalRect};
+use crate::geom::{PhysicalPoint, PhysicalRect, PhysicalSides};
 
 pub(crate) struct PaintTraversal<'a, Handler: PaintTraversalHandler> {
     handler: &'a mut Handler,
     outlines: Vec<(TraversalState, Arc<BoxFragment>)>,
+    /// Scroll containers with classic scrollbars, painted with the outlines so that
+    /// they are on top of the content of their scroll container.
+    scrollbars: Vec<(TraversalState, Arc<BoxFragment>)>,
     floats: Vec<(TraversalState, Arc<BoxFragment>)>,
 }
 
@@ -29,6 +32,7 @@ impl<'a, Handler: PaintTraversalHandler> PaintTraversal<'a, Handler> {
         Self {
             handler,
             outlines: Vec::new(),
+            scrollbars: Vec::new(),
             floats: Vec::new(),
         }
         .traverse_stacking_context(&TraversalState::default(), root_stacking_context);
@@ -41,6 +45,7 @@ impl<'a, Handler: PaintTraversalHandler> PaintTraversal<'a, Handler> {
         stacking_context: &StackingContext,
     ) {
         let old_outlines_length = self.outlines.len();
+        let old_scrollbars_length = self.scrollbars.len();
         let state = state.push_stacking_context(stacking_context);
         let stacking_context_state = self.handler.visit_stacking_context(stacking_context);
 
@@ -102,6 +107,7 @@ impl<'a, Handler: PaintTraversalHandler> PaintTraversal<'a, Handler> {
         // > Step 11: If the UA uses out-of-band outlines, draw all of root’s outlines
         // > (those that it skipped drawing due to not using in-band outlines during the
         // > current invocation of this algorithm) into canvas.
+        self.paint_scrollbars_since(old_scrollbars_length);
         if old_outlines_length < self.outlines.len() {
             for (state, outline_fragment) in &self.outlines.split_off(old_outlines_length) {
                 self.handler.visit_box_for_outline(state, outline_fragment);
@@ -190,6 +196,7 @@ impl<'a, Handler: PaintTraversalHandler> PaintTraversal<'a, Handler> {
         is_block_level: bool,
     ) {
         let old_outlines_length = self.outlines.len();
+        let old_scrollbars_length = self.scrollbars.len();
 
         // > Step 4: If root is a block-level box, paint a block’s decorations given root
         // > and canvas.
@@ -203,6 +210,7 @@ impl<'a, Handler: PaintTraversalHandler> PaintTraversal<'a, Handler> {
         // > Step 11: If the UA uses out-of-band outlines, draw all of root’s outlines
         // > (those that it skipped drawing due to not using in-band outlines during the
         // > current invocation of this algorithm) into canvas.
+        self.paint_scrollbars_since(old_scrollbars_length);
         if old_outlines_length < self.outlines.len() {
             for (state, outline_fragment) in &self.outlines.split_off(old_outlines_length) {
                 self.handler.visit_box_for_outline(state, outline_fragment);
@@ -502,7 +510,23 @@ impl<'a, Handler: PaintTraversalHandler> PaintTraversal<'a, Handler> {
             self.outlines
                 .push((state.clone(), fragment.box_fragment.clone()));
         }
+        if fragment.scrollbar_gutter != PhysicalSides::zero() {
+            self.scrollbars
+                .push((state.clone(), fragment.box_fragment.clone()));
+        }
         self.handler.visit_box(state, fragment);
+    }
+
+    /// Paint the classic scrollbars of the scroll containers found since the given
+    /// length of `Self::scrollbars`. They are painted like out-of-band outlines, after
+    /// everything else in the stacking context, so that the content of their scroll
+    /// container does not cover them.
+    fn paint_scrollbars_since(&mut self, old_scrollbars_length: usize) {
+        if old_scrollbars_length < self.scrollbars.len() {
+            for (state, fragment) in &self.scrollbars.split_off(old_scrollbars_length) {
+                self.handler.visit_box_for_scrollbars(state, fragment);
+            }
+        }
     }
 }
 
@@ -539,6 +563,7 @@ pub(crate) trait PaintTraversalHandler {
 
     fn visit_box_for_root_background(&mut self, _state: &TraversalState) {}
     fn visit_box_for_outline(&mut self, _state: &TraversalState, _fragment: &Arc<BoxFragment>) {}
+    fn visit_box_for_scrollbars(&mut self, _state: &TraversalState, _fragment: &Arc<BoxFragment>) {}
     fn visit_box_for_collapsed_table_borders(
         &mut self,
         _state: &TraversalState,
