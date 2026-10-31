@@ -1012,6 +1012,7 @@ impl DocumentEventHandler {
             MouseButtonAction::Down => {
                 self.last_mouse_button_down_point
                     .set(Some(hit_test_result.point_in_frame));
+                document.focus_handler().note_pointer_interaction();
 
                 // Step 6. Dispatch pointerdown event.
                 let pointer_event_name = if self.mouse_button_state.get().is_empty() {
@@ -1610,6 +1611,23 @@ impl DocumentEventHandler {
         cx: &mut JSContext,
         keyboard_event: EmbedderKeyboardEvent,
     ) -> InputEventResult {
+        // Keyboard shortcuts, with Control, Alt or Meta, do not count as using the keyboard
+        // to interact with the page for `:focus-visible`, as in other engines.
+        let event = &keyboard_event.event;
+        let is_shortcut = event
+            .modifiers
+            .intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::META) ||
+            matches!(
+                event.key,
+                Key::Named(NamedKey::Control | NamedKey::Alt | NamedKey::Meta)
+            );
+        if event.state == KeyState::Down && !is_shortcut {
+            self.window
+                .Document()
+                .focus_handler()
+                .note_keyboard_interaction();
+        }
+
         let target = &self.target_for_events_following_focus();
         let keyevent = KeyboardEvent::new_with_platform_keyboard_event(
             cx,

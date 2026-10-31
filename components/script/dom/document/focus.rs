@@ -24,7 +24,10 @@ use servo_constellation_traits::{
 use crate::dom::bindings::root::MutNullableDom;
 use crate::dom::focusevent::FocusEventType;
 use crate::dom::node::focus::{FocusNavigationScopeOwner, FocusTrigger};
-use crate::dom::types::{Element, EventTarget, FocusEvent, HTMLElement, HTMLIFrameElement, Window};
+use crate::dom::types::{
+    Element, EventTarget, FocusEvent, HTMLElement, HTMLIFrameElement, HTMLInputElement,
+    HTMLTextAreaElement, Window,
+};
 use crate::dom::{Document, Event, EventBubbles, EventCancelable, Node, NodeTraits};
 use crate::realms::enter_auto_realm;
 
@@ -168,6 +171,10 @@ pub(crate) struct DocumentFocusHandler {
     has_focus: Cell<bool>,
     /// <https://html.spec.whatwg.org/multipage/#sequential-focus-navigation-starting-point>
     sequential_focus_navigation_starting_point: MutNullableDom<Node>,
+    /// Whether the last user interaction with the document was with the keyboard rather than
+    /// a pointer, which decides whether newly focused elements match `:focus-visible`. Before
+    /// any interaction, focus moved by script is visible.
+    last_interaction_was_keyboard: Cell<bool>,
 }
 
 impl DocumentFocusHandler {
@@ -178,7 +185,57 @@ impl DocumentFocusHandler {
             focus_sequence: Cell::new(FocusSequenceNumber::default()),
             has_focus: Cell::new(has_focus),
             sequential_focus_navigation_starting_point: Default::default(),
+            last_interaction_was_keyboard: Cell::new(true),
         }
+    }
+
+    /// Note that the user pressed a pointer button in the document, so that focus moved from
+    /// now on (by the click itself or by script reacting to it) does not match
+    /// `:focus-visible`, unless it lands on an element that takes keyboard input.
+    pub(crate) fn note_pointer_interaction(&self) {
+        self.last_interaction_was_keyboard.set(false);
+    }
+
+    /// Note that the user pressed a key in the document. From
+    /// <https://drafts.csswg.org/selectors/#the-focus-visible-pseudo>:
+    /// > If the user interacts with the page via keyboard, the currently focused element
+    /// > should match :focus-visible (i.e. keyboard usage may change whether this
+    /// > pseudo-class matches even if it doesn't affect :focus).
+    pub(crate) fn note_keyboard_interaction(&self) {
+        self.last_interaction_was_keyboard.set(true);
+        if let Some(element) = self.focused_area.borrow().element() {
+            element.set_focus_visible_state(true);
+        }
+    }
+
+    /// Whether `element`, which is becoming focused, should match `:focus-visible`, following
+    /// the heuristics of <https://drafts.csswg.org/selectors/#the-focus-visible-pseudo>:
+    /// > - Any element which supports keyboard input (such as an input element, or any other
+    /// >   element which may trigger a virtual keyboard to be shown on focus if a physical
+    /// >   keyboard is not present) should always match :focus-visible when focused.
+    /// > - If the user interacts with the page via keyboard, the currently focused element
+    /// >   should match :focus-visible.
+    /// > - If the user interacts with the page via a pointing device, such that the focus is
+    /// >   moved to a new element which does not support user input, the newly focused
+    /// >   element should not match :focus-visible.
+    /// > - If the active element matches :focus-visible, and a script causes focus to move
+    /// >   elsewhere, the newly focused element should match :focus-visible. Conversely, if
+    /// >   the active element does not match :focus-visible, and a script causes focus to
+    /// >   move elsewhere, the newly focused element should not match :focus-visible.
+    ///
+    /// Focus moved by script follows the last interaction, as the active element matches
+    /// `:focus-visible` exactly when that was with the keyboard, unless it takes keyboard input.
+    fn should_match_focus_visible(&self, element: &Element) -> bool {
+        if self.last_interaction_was_keyboard.get() {
+            return true;
+        }
+        if element
+            .downcast::<HTMLInputElement>()
+            .is_some_and(HTMLInputElement::is_textual_or_password)
+        {
+            return true;
+        }
+        element.is::<HTMLTextAreaElement>() || element.upcast::<Node>().is_editing_host()
     }
 
     pub(crate) fn has_focus(&self) -> bool {
@@ -226,9 +283,12 @@ impl DocumentFocusHandler {
 
         if let Some(previously_focused_element) = self.focused_area.borrow().element() {
             recursively_set_focus_status(previously_focused_element, false);
+            previously_focused_element.set_focus_visible_state(false);
         }
         if let Some(newly_focused_element) = new_focusable_area.element() {
             recursively_set_focus_status(newly_focused_element, true);
+            newly_focused_element
+                .set_focus_visible_state(self.should_match_focus_visible(newly_focused_element));
         }
 
         *self.focused_area.borrow_mut() = new_focusable_area;

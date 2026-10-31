@@ -109,11 +109,11 @@ link:link[rel~=help], link:visited[rel~=help] { cursor: help; }
 /*
  * FIXME: use `outline: auto;`
  */
-a:focus, area:focus {
+a:focus-visible, area:focus-visible {
   outline: thin dotted;
 }
 
-input:focus, textarea:focus, button:focus {
+input:focus-visible, textarea:focus-visible, button:focus-visible {
   outline: thin solid black;
 }
 
