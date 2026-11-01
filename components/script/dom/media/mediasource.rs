@@ -497,14 +497,15 @@ impl MediaSource {
         buffer.set_active(true);
         self.active_source_buffers
             .add_in_order_of(buffer, &self.source_buffers);
+        // Step 7. If the active track flag equals true and the HTMLMediaElement's readyState
+        // attribute is greater than HAVE_CURRENT_DATA, then set it to HAVE_METADATA.
+        if let Some(element) = element.as_ref() {
+            element.media_source_tracks_activated(cx);
+        }
         // Step 8. If each object in sourceBuffers of the parent media source
         // has [[first initialization segment received flag]] equal to true,
         // and the HTMLMediaElement's readyState attribute is HAVE_NOTHING,
         // then set it to HAVE_METADATA.
-        // Step 7, which drops a readyState above HAVE_CURRENT_DATA back to
-        // HAVE_METADATA when a buffer added during playback gets its first
-        // initialization segment, is not implemented: nothing would raise
-        // the readyState again afterwards.
         let all_received = self
             .source_buffers
             .buffers()
@@ -512,6 +513,17 @@ impl MediaSource {
             .all(|buffer| buffer.first_initialization_segment_received());
         if all_received && let Some(element) = element {
             element.media_source_metadata_received(cx, &tracks);
+        }
+    }
+
+    /// The source buffers' buffered ranges changed (an append or a removal
+    /// completed, or the stream ended): the media element's readyState
+    /// follows them.
+    ///
+    /// <https://w3c.github.io/media-source/#sourcebuffer-coded-frame-processing> (steps 2-4)
+    pub(crate) fn buffered_changed(&self, cx: &mut JSContext) {
+        if let Some(element) = self.media_element.get() {
+            element.update_media_source_ready_state(cx);
         }
     }
 
@@ -558,6 +570,9 @@ impl MediaSource {
                 if let Err(error) = self.change_duration(largest_end_time) {
                     warn!("Could not set the duration at the end of stream: {error:?}");
                 }
+                // The last buffered range now reaches the end of the media: the
+                // media element has all the media data left to play.
+                self.buffered_changed(cx);
             },
             // Error set to "network" or "decode": the media element's network
             // or decode error steps.
