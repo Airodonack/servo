@@ -192,6 +192,17 @@ pub(crate) fn is_valid_media_source_type(type_: &str) -> bool {
     }
 }
 
+/// Whether a SourceBuffer of this content type can be created: the type must
+/// be a registered byte stream format with codecs the format allows, and the
+/// media backend must decode them. `addSourceBuffer`, `changeType` and
+/// `isTypeSupported` share this test; their "not supported" steps are worded
+/// the same.
+///
+/// <https://w3c.github.io/media-source/#dom-mediasource-istypesupported>
+pub(crate) fn is_media_source_type_supported(type_: &str) -> bool {
+    is_valid_media_source_type(type_) && ServoMedia::get().is_media_source_type_supported(type_)
+}
+
 /// <https://w3c.github.io/media-source/#mediasource>
 #[dom_struct]
 pub(crate) struct MediaSource {
@@ -777,9 +788,7 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         // contains a MIME type that is not supported with the types specified
         // for the other SourceBuffer objects in sourceBuffers, then throw a
         // NotSupportedError exception.
-        if !is_valid_media_source_type(&type_.str()) ||
-            !ServoMedia::get().is_media_source_type_supported(&type_.str())
-        {
+        if !is_media_source_type_supported(&type_.str()) {
             debug!("MediaSource: addSourceBuffer({type_}) refused: unsupported type");
             return Err(Error::NotSupported(Some(
                 "The content type is not supported".into(),
@@ -934,9 +943,8 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         }
         // Steps 2-6. The type must be a registered byte stream format with
         // codecs the format allows, and the media backend must decode them.
-        let valid = is_valid_media_source_type(&type_.str());
-        let supported = valid && ServoMedia::get().is_media_source_type_supported(&type_.str());
-        debug!("MediaSource: isTypeSupported({type_}) = {supported} (valid syntax: {valid})");
+        let supported = is_media_source_type_supported(&type_.str());
+        debug!("MediaSource: isTypeSupported({type_}) = {supported}");
         supported
     }
 }

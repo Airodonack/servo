@@ -586,8 +586,9 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
         // Steps 2-3. Removed or updating: InvalidStateError.
         self.check_state(false)?;
         // Step 4. If type contains a MIME type that is not supported, then
-        // throw a NotSupportedError exception.
-        if !crate::dom::mediasource::is_valid_media_source_type(&type_.str()) {
+        // throw a NotSupportedError exception: the same test as addSourceBuffer,
+        // registry and backend, before step 5 reopens an ended media source.
+        if !crate::dom::mediasource::is_media_source_type_supported(&type_.str()) {
             return Err(Error::NotSupported(Some(
                 "The content type is not supported".into(),
             )));
