@@ -240,6 +240,9 @@ fn stream_track(stream: &gstreamer::Stream) -> Option<MediaSourceTrack> {
 /// find the mselib buffer behind a handle without a second registry.
 const SOURCE_BUFFER_ID_KEY: &str = "servo-source-buffer-id";
 
+/// mselib's source buffer property for the timestamp offset, in nanoseconds.
+const TIMESTAMP_OFFSET: &str = "timestamp-offset";
+
 fn source_buffer_id(buffer: &gst_mse::SourceBuffer) -> Option<usize> {
     // SAFETY: the key is only ever set with a `usize` by `GStreamerSourceBuffer::new`,
     // and the value lives as long as the GObject.
@@ -262,6 +265,10 @@ pub struct GStreamerSourceBuffer {
     /// claimed yet, which credits a track to the wrong buffer when two
     /// initialization segments are parsed before either append ends.
     per_buffer_tracks: bool,
+    /// Whether mselib takes a negative timestamp offset: its
+    /// `timestamp-offset` property's range includes negative values. An
+    /// mselib that holds the offset as an unsigned GstClockTime clamps it.
+    signed_timestamp_offset: bool,
     claimed_tracks: ClaimedTracks,
     /// The counted tracks this buffer claimed.
     counted_tracks: Mutex<Vec<MediaSourceTrack>>,
@@ -325,12 +332,21 @@ impl GStreamerSourceBuffer {
         buffer.connect_on_abort(report(SourceBufferEvent::Abort));
         let per_buffer_tracks =
             buffer.has_property_with_type("tracks", gstreamer::StreamCollection::static_type());
+        let signed_timestamp_offset =
+            buffer
+                .find_property(TIMESTAMP_OFFSET)
+                .is_some_and(|property| {
+                    property
+                        .downcast_ref::<glib::ParamSpecInt64>()
+                        .is_some_and(|property| property.minimum() < 0)
+                });
         Self {
             id,
             buffer,
             source: source.clone(),
             mse_src: mse_src.clone(),
             per_buffer_tracks,
+            signed_timestamp_offset,
             claimed_tracks,
             counted_tracks: Default::default(),
             operations,
@@ -461,11 +477,24 @@ impl SourceBufferHandle for GStreamerSourceBuffer {
     }
 
     fn timestamp_offset(&self) -> f64 {
-        seconds(self.buffer.timestamp_offset()).unwrap_or(0.0)
+        // The property is a signed number of nanoseconds in every mselib.
+        self.buffer.property::<i64>(TIMESTAMP_OFFSET) as f64 / 1e9
     }
 
     fn set_timestamp_offset(&self, offset: f64) -> Result<(), MediaSourceError> {
-        // mselib (1.28.6 and main) holds the offset as an unsigned GstClockTime.
+        if self.signed_timestamp_offset {
+            // Through the property: the bindings'
+            // gst_source_buffer_set_timestamp_offset() takes an unsigned
+            // GstClockTime. Rounded, so that an offset such as -10.4 s reads
+            // back as set; GST_CLOCK_STIME_NONE (the smallest gint64) is not a
+            // time. The DOM has refused the setter on a removed or updating
+            // buffer, the only errors mselib reports here.
+            let nanoseconds = ((offset * 1e9).round() as i64).max(-i64::MAX);
+            self.buffer.set_property(TIMESTAMP_OFFSET, nanoseconds);
+            return Ok(());
+        }
+        // An mselib (1.28.6 and main) that holds the offset as an unsigned
+        // GstClockTime.
         if offset < 0.0 {
             log::warn!("Negative timestampOffset {offset} is not supported; using 0");
         }
