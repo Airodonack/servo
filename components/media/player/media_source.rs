@@ -167,13 +167,6 @@ pub trait MediaSourceHandle: Send {
 
     /// The range set with `set_live_seekable_range`, if any.
     fn live_seekable_range(&self) -> Option<Range<f64>>;
-
-    /// The tracks of every initialization segment received so far, over all
-    /// source buffers, in the order they were found. The DOM creates the
-    /// media element's AudioTrack and VideoTrack objects from these.
-    ///
-    /// <https://w3c.github.io/media-source/#sourcebuffer-init-segment-received> (step 5)
-    fn tracks(&self) -> Vec<MediaSourceTrack>;
 }
 
 /// One source buffer of an attached media source.
@@ -194,6 +187,14 @@ pub trait SourceBufferHandle: Send {
     ///
     /// <https://w3c.github.io/media-source/#dom-mediasource-activesourcebuffers>
     fn is_active(&self) -> bool;
+
+    /// The tracks of this buffer's initialization segment, empty until the
+    /// first one has been processed. The DOM creates the media element's
+    /// AudioTrack and VideoTrack objects from these, and removes them again
+    /// with the buffer.
+    ///
+    /// <https://w3c.github.io/media-source/#sourcebuffer-init-segment-received> (step 5)
+    fn tracks(&self) -> Vec<MediaSourceTrack>;
 
     /// <https://w3c.github.io/media-source/#dom-sourcebuffer-buffered>
     fn buffered(&self) -> BufferedRanges;

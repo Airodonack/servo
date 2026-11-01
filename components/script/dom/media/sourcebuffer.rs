@@ -12,8 +12,8 @@ use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_weak_referenceable_dom_object;
 use servo_base::generic_channel::GenericCallback;
 use servo_media::player::media_source::{
-    AppendMode as BackendAppendMode, OperationId, SourceBufferEvent, SourceBufferHandle,
-    SourceBufferReport,
+    AppendMode as BackendAppendMode, MediaSourceTrack, OperationId, SourceBufferEvent,
+    SourceBufferHandle, SourceBufferReport,
 };
 use stylo_atoms::Atom;
 
@@ -179,6 +179,16 @@ impl SourceBuffer {
 
     pub(crate) fn first_initialization_segment_received(&self) -> bool {
         self.first_initialization_segment_received.get()
+    }
+
+    /// The tracks of this buffer's initialization segment, as the backend
+    /// parsed them.
+    pub(crate) fn tracks(&self) -> Vec<MediaSourceTrack> {
+        self.handle
+            .borrow()
+            .as_ref()
+            .map(|handle| handle.tracks())
+            .unwrap_or_default()
     }
 
     pub(crate) fn set_track_ids(&self, ids: Vec<String>) {
