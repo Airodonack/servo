@@ -103,106 +103,42 @@ pub(crate) fn media_source_error(error: MediaSourceError) -> Error {
 }
 
 /// Whether a SourceBuffer of this content type can be created: the type must
-/// be a registered byte stream format with codecs the format allows, and the
-/// media backend must decode them. `addSourceBuffer`, `changeType` and
-/// `isTypeSupported` share this test; their "not supported" steps are worded
-/// the same.
+/// have the shape [`is_valid_media_source_type`] checks, and the media backend
+/// must support its byte stream format and decode its codecs.
+/// `addSourceBuffer`, `changeType` and `isTypeSupported` share this test;
+/// their "not supported" steps are worded the same.
 ///
 /// <https://w3c.github.io/media-source/#dom-mediasource-istypesupported>
 pub(crate) fn is_media_source_type_supported(type_: &str) -> bool {
     is_valid_media_source_type(type_) && ServoMedia::get().is_media_source_type_supported(type_)
 }
 
-/// Whether `type_` names a byte stream format and codecs that could go through
-/// a SourceBuffer, before asking the backend whether they decode: the MIME
-/// type must be one of the registered byte stream formats, MP4 and WebM must
-/// name their codecs, the MPEG audio formats must not, and every codec must
-/// belong to the container and have the shape the registry gives it.
+/// Whether `type_` has the shape of a SourceBuffer's type, before the media
+/// backend is asked which byte stream formats and codecs it supports: a MIME
+/// type, and for the ISO BMFF and WebM formats (video/mp4, audio/mp4,
+/// video/webm, audio/webm) a codecs parameter that names at least one codec.
+/// Which formats are registered, which codecs each may carry and the shape of
+/// a codec string are the backend's answer, which follows the registry.
+///
+/// An ISO BMFF or WebM type without codecs is refused, as Chrome refuses it
+/// in isTypeSupported(): it does not say what the bytes carry, which
+/// web-platform-tests' media-source isTypeSupported() cases expect.
 ///
 /// <https://w3c.github.io/mse-byte-stream-format-registry/>
 pub(crate) fn is_valid_media_source_type(type_: &str) -> bool {
     let Ok(mime) = type_.trim().parse::<Mime>() else {
         return false;
     };
-    let essence = format!("{}/{}", mime.type_(), mime.subtype()).to_ascii_lowercase();
-    let codecs: Option<Vec<String>> = mime.get_param("codecs").map(|codecs| {
+    let names_codecs = mime.get_param("codecs").is_some_and(|codecs| {
         codecs
             .as_str()
             .split(',')
-            .map(|codec| codec.trim().to_ascii_lowercase())
-            .filter(|codec| !codec.is_empty())
-            .collect()
+            .any(|codec| !codec.trim().is_empty())
     });
-    let valid_codec = |codec: &str, video_allowed: bool, container: &str| -> bool {
-        let id = codec.split('.').next().unwrap_or("");
-        let video = matches!(
-            id,
-            "avc1" | "avc3" | "hev1" | "hvc1" | "av01" | "vp8" | "vp09" | "vp9"
-        );
-        let audio = matches!(
-            id,
-            "mp4a" | "opus" | "flac" | "vorbis" | "mp3" | "ac-3" | "ec-3"
-        );
-        if !(video || audio) || (video && !video_allowed) {
-            return false;
-        }
-        match container {
-            "mp4" => {
-                if !matches!(
-                    id,
-                    "avc1" |
-                        "avc3" |
-                        "hev1" |
-                        "hvc1" |
-                        "av01" |
-                        "vp09" |
-                        "mp4a" |
-                        "opus" |
-                        "flac" |
-                        "ac-3" |
-                        "ec-3"
-                ) {
-                    return false;
-                }
-                // mp4a.XX[.N] and avc1.XXXXXX need their object type / profile.
-                match id {
-                    // mp4a.<object type>, with the audio object type as a
-                    // third part exactly when the object type is 40 (AAC).
-                    "mp4a" => {
-                        let parts: Vec<&str> = codec.split('.').collect();
-                        match parts.as_slice() {
-                            ["mp4a", oti] => {
-                                oti.len() == 2 &&
-                                    *oti != "40" &&
-                                    oti.chars().all(|c| c.is_ascii_hexdigit())
-                            },
-                            ["mp4a", "40", aot] => {
-                                !aot.is_empty() && aot.chars().all(|c| c.is_ascii_digit())
-                            },
-                            _ => false,
-                        }
-                    },
-                    "avc1" | "avc3" => codec.len() > 5,
-                    _ => true,
-                }
-            },
-            "webm" => matches!(id, "vp8" | "vp9" | "vorbis" | "opus" | "av01"),
-            _ => false,
-        }
-    };
+    let essence = format!("{}/{}", mime.type_(), mime.subtype()).to_ascii_lowercase();
     match essence.as_str() {
-        "video/mp4" | "audio/mp4" | "video/webm" | "audio/webm" => {
-            let container = &essence[6..];
-            let video_allowed = essence.starts_with("video/");
-            match codecs {
-                Some(codecs) if !codecs.is_empty() => codecs
-                    .iter()
-                    .all(|codec| valid_codec(codec, video_allowed, container)),
-                _ => false,
-            }
-        },
-        "audio/mpeg" | "audio/aac" => codecs.is_none(),
-        _ => false,
+        "video/mp4" | "audio/mp4" | "video/webm" | "audio/webm" => names_codecs,
+        _ => true,
     }
 }
 
