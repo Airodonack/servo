@@ -305,6 +305,12 @@ impl PlayerInner {
         Ok(())
     }
 
+    pub fn position(&self) -> Option<f64> {
+        self.player
+            .position()
+            .map(|position| position.seconds_f64())
+    }
+
     pub fn set_volume(&mut self, volume: f64) -> Result<(), PlayerError> {
         if self.volume.get() == volume {
             return Ok(());
@@ -1096,6 +1102,7 @@ impl Player for GStreamerPlayer {
     inner_player_proxy_getter!(playback_rate, f64, DEFAULT_PLAYBACK_RATE);
     inner_player_proxy!(push_data, data, Vec<u8>);
     inner_player_proxy!(seek, time, f64);
+    inner_player_proxy_getter!(position, Option<f64>, None);
     inner_player_proxy!(set_volume, volume, f64);
     inner_player_proxy_getter!(volume, f64, DEFAULT_VOLUME);
     inner_player_proxy_getter!(buffered, Vec<Range<f64>>, DEFAULT_TIME_RANGES);

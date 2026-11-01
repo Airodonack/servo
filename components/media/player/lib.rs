@@ -110,6 +110,11 @@ pub trait Player: Send + MediaInstance {
     fn can_resume(&self) -> bool;
     fn stop(&self) -> Result<(), PlayerError>;
     fn seek(&self, time: f64) -> Result<(), PlayerError>;
+    /// The position in seconds the player is at now, or `None` when the backend cannot tell
+    /// (no media loaded yet). A media element ends a seek the player refused there.
+    fn position(&self) -> Option<f64> {
+        None
+    }
     fn seekable(&self) -> Vec<Range<f64>>;
     fn set_mute(&self, muted: bool) -> Result<(), PlayerError>;
     fn muted(&self) -> bool;

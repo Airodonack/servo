@@ -2335,16 +2335,33 @@ impl HTMLMediaElement {
         self.queue_media_element_task_to_fire_event(atom!("seeking"));
 
         // Step 11. Set the current playback position to the new playback position.
+        let position_before_seek = self.current_playback_position.get();
         self.current_playback_position.set(time);
 
-        if let Some(ref player) = *self.player.borrow() {
-            self.player_ended.set(false);
-            if let Err(error) = player.lock().unwrap().seek(time) {
-                error!("Could not seek player: {error:?}");
+        let refused = self.player.borrow().as_ref().and_then(|player| {
+            let player = player.lock().unwrap();
+            match player.seek(time) {
+                Ok(()) => {
+                    self.player_ended.set(false);
+                    None
+                },
+                Err(error) => Some((error, player.position())),
             }
-        }
+        });
 
         self.current_seek_position.set(time);
+
+        // The spec has no seek that fails. When the player refuses one, the media data for the
+        // new playback position will never be available (step 12), so the seek ends where the
+        // player is: the current playback position becomes the player's position and the
+        // remaining steps run, ending with seeked, so that seeking never stays true.
+        if let Some((error, player_position)) = refused {
+            let position = player_position.unwrap_or(position_before_seek);
+            warn!("The player refused the seek to {time}: {error:?}; ending it at {position}");
+            self.current_playback_position.set(position);
+            self.queue_seek_end_after_refused_seek(time);
+            return;
+        }
 
         // With a MediaSource attached: "If new playback position is not in any TimeRanges of
         // HTMLMediaElement.buffered", readyState drops to HAVE_METADATA, and the media element
@@ -2360,6 +2377,30 @@ impl HTMLMediaElement {
         // play back that position.
         // The rest of the steps are handled when the media engine signals a ready state change or
         // otherwise satisfies seek completion and signals a position change.
+    }
+
+    /// Runs the seek's remaining steps from step 13 for a seek the player refused, unless
+    /// another seek has replaced it.
+    ///
+    /// <https://html.spec.whatwg.org/multipage/#dom-media-seek>
+    fn queue_seek_end_after_refused_seek(&self, target: f64) {
+        let this = Trusted::new(self);
+        let generation_id = self.generation_id.get();
+
+        self.owner_global()
+            .task_manager()
+            .media_element_task_source()
+            .queue(task!(refused_seek_end: move |cx| {
+                let this = this.root();
+                if generation_id != this.generation_id.get() ||
+                    !this.seeking.get() ||
+                    this.current_seek_position.get() != target
+                {
+                    return;
+                }
+
+                this.await_seeked(cx);
+            }));
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-media-seek>
