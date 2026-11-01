@@ -279,6 +279,9 @@ impl SourceBuffer {
             SourceBufferEvent::Update | SourceBufferEvent::UpdateEnd => {
                 self.updating.set(false);
                 self.initialization_segment_received(cx);
+                // Coded frame processing, steps 2-4, and coded frame removal, step 3.5: the
+                // media element's readyState follows what is now buffered.
+                self.media_source.buffered_changed(cx);
                 self.queue_event("update");
                 self.queue_event("updateend");
             },
