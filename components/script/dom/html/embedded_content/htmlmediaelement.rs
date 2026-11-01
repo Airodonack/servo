@@ -244,6 +244,9 @@ pub(crate) struct HTMLMediaElement {
     /// the new playback position to be buffered.
     /// <https://w3c.github.io/media-source/#mediasource-seeking>
     media_source_seek_done: Cell<bool>,
+    /// Whether the player reported a seek done, during the current seek, at a position away
+    /// from the new playback position: the end of a seek of its own, not of this one.
+    seek_done_elsewhere: Cell<bool>,
     /// <https://html.spec.whatwg.org/multipage/#dom-media-error>
     error: MutNullableDom<MediaError>,
     /// The MediaSource attached to this element, while one is.
@@ -294,6 +297,9 @@ pub(crate) struct HTMLMediaElement {
     /// initiated by a script or by the user agent itself, rather than by the media engine and to
     /// abort other running instance of the `seek` algorithm.
     current_seek_position: Cell<f64>,
+    /// Counts the instances of the `seek` algorithm, so that a task queued for one can tell
+    /// whether another has replaced it, even one to the same position.
+    seek_count: Cell<u64>,
     /// <https://html.spec.whatwg.org/multipage/#concept-media-muted-state>
     /// > Each media element has a muted state, which is either true, false,
     /// > or "default"; it is initially "default".
@@ -479,6 +485,7 @@ impl HTMLMediaElement {
             end_of_playback_reached: Cell::new(false),
             media_source_error_reported: Cell::new(false),
             media_source_seek_done: Cell::new(false),
+            seek_done_elsewhere: Cell::new(false),
             error: Default::default(),
             media_source: Default::default(),
             paused: Cell::new(true),
@@ -509,6 +516,7 @@ impl HTMLMediaElement {
             volume: Cell::new(1.0),
             seeking: Cell::new(false),
             current_seek_position: Cell::new(f64::NAN),
+            seek_count: Cell::new(0),
             resource_url: DomRefCell::new(None),
             blob_url: DomRefCell::new(None),
             played: DomRefCell::new(TimeRangesContainer::default()),
@@ -2271,7 +2279,9 @@ impl HTMLMediaElement {
         // algorithm is already running. Abort that other instance of the algorithm without waiting
         // for the step that it is running to complete.
         self.current_seek_position.set(f64::NAN);
+        self.seek_count.set(self.seek_count.get().wrapping_add(1));
         self.media_source_seek_done.set(false);
+        self.seek_done_elsewhere.set(false);
 
         // Step 4. Set the seeking IDL attribute to true.
         self.seeking.set(true);
@@ -2342,15 +2352,30 @@ impl HTMLMediaElement {
         self.queue_media_element_task_to_fire_event(atom!("seeking"));
 
         // Step 11. Set the current playback position to the new playback position.
+        let position_before_seek = self.current_playback_position.get();
         self.current_playback_position.set(time);
 
-        if let Some(ref player) = *self.player.borrow() &&
-            let Err(error) = player.lock().unwrap().seek(time)
-        {
-            error!("Could not seek player: {error:?}");
-        }
+        let refused = self.player.borrow().as_ref().and_then(|player| {
+            let player = player.lock().unwrap();
+            match player.seek(time) {
+                Ok(()) => None,
+                Err(error) => Some((error, player.position())),
+            }
+        });
 
         self.current_seek_position.set(time);
+
+        // The spec has no seek that fails. When the player refuses one, the media data for the
+        // new playback position will never be available (step 12), so the seek ends where the
+        // player is: the current playback position becomes the player's position and the
+        // remaining steps run, ending with seeked, so that seeking never stays true.
+        if let Some((error, player_position)) = refused {
+            let position = player_position.unwrap_or(position_before_seek);
+            warn!("The player refused the seek to {time}: {error:?}; ending it at {position}");
+            self.current_playback_position.set(position);
+            self.queue_seek_end_after_refused_seek();
+            return;
+        }
 
         // With a MediaSource attached: "If new playback position is not in any TimeRanges of
         // HTMLMediaElement.buffered", readyState drops to HAVE_METADATA, and the media element
@@ -2366,6 +2391,32 @@ impl HTMLMediaElement {
         // play back that position.
         // The rest of the steps are handled when the media engine signals a ready state change or
         // otherwise satisfies seek completion and signals a position change.
+    }
+
+    /// Runs the seek's remaining steps from step 13 for a seek the player refused, unless
+    /// another seek has replaced it.
+    ///
+    /// <https://html.spec.whatwg.org/multipage/#dom-media-seek>
+    fn queue_seek_end_after_refused_seek(&self) {
+        let this = Trusted::new(self);
+        let generation_id = self.generation_id.get();
+        // A later seek to the same position, one the player accepts, must not be ended here.
+        let seek_count = self.seek_count.get();
+
+        self.owner_global()
+            .task_manager()
+            .media_element_task_source()
+            .queue(task!(refused_seek_end: move |cx| {
+                let this = this.root();
+                if generation_id != this.generation_id.get() ||
+                    !this.seeking.get() ||
+                    this.seek_count.get() != seek_count
+                {
+                    return;
+                }
+
+                this.await_seeked(cx);
+            }));
     }
 
     /// <https://html.spec.whatwg.org/multipage/#dom-media-seek>
@@ -3319,6 +3370,16 @@ impl HTMLMediaElement {
     fn playback_position_changed(&self, cx: &mut JSContext, position: f64) {
         // Abort the following steps of the current time update if seeking is in progress.
         if self.seeking.get() {
+            // GStreamer's player, paused after its end of stream, seeks to the beginning on its
+            // own. A seek asked for before that seek's media is shown ends with a single
+            // seek-done, for the player's own seek and at the position from before it, and none
+            // follows for the seek asked for. The player reports its position once that seek
+            // is done: a position at the new playback position ends the seek then.
+            if self.seek_done_elsewhere.get() &&
+                (position - self.current_seek_position.get()).abs() <= SEEK_POSITION_THRESHOLD
+            {
+                self.playback_seek_done(cx, position);
+            }
             return;
         }
 
@@ -3383,7 +3444,11 @@ impl HTMLMediaElement {
         // If the seek was initiated by script or by the user agent itself continue with the
         // following steps, otherwise abort.
         let delta = (position - self.current_seek_position.get()).abs();
-        if !self.seeking.get() || delta > SEEK_POSITION_THRESHOLD {
+        if !self.seeking.get() {
+            return;
+        }
+        if delta > SEEK_POSITION_THRESHOLD {
+            self.seek_done_elsewhere.set(true);
             return;
         }
 
