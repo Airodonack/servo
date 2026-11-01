@@ -833,14 +833,15 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         if let Some(element) = self.media_element.get() {
             element.remove_media_source_tracks(&source_buffer.take_track_ids());
         }
-        // Steps 3-9. Remove the tracks, remove from activeSourceBuffers and
-        // sourceBuffers, with their events, and destroy the resources.
+        // Steps 6-9. Remove the buffer from activeSourceBuffers and
+        // sourceBuffers, with their events, and destroy its resources. Step 1
+        // is this method's only exception, and steps 2-5 have already run, so a
+        // backend refusal here is logged and the remaining steps go ahead.
         if let Some(handle) = self.handle.borrow().as_ref() &&
-            let Some(buffer_handle) = source_buffer.handle().as_ref()
+            let Some(buffer_handle) = source_buffer.handle().as_ref() &&
+            let Err(error) = handle.remove_source_buffer(buffer_handle.as_ref())
         {
-            handle
-                .remove_source_buffer(buffer_handle.as_ref())
-                .map_err(media_source_error)?;
+            warn!("MediaSource: removeSourceBuffer: the backend refused: {error:?}");
         }
         source_buffer.mark_removed();
         self.active_source_buffers.remove(source_buffer);
