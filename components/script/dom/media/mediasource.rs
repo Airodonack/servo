@@ -342,7 +342,15 @@ impl MediaSource {
     }
 
     /// <https://w3c.github.io/media-source/#mediasource-detach>
+    ///
+    /// Run by the media element when it loads another resource, and when the
+    /// backend closes the media source on its own. After the backend has
+    /// closed it, the element's call finds it detached and does nothing, so
+    /// sourceclose fires once.
     pub(crate) fn detach(&self, cx: &mut JSContext) {
+        if !self.is_attached() {
+            return;
+        }
         // Step 1. Set the readyState attribute to "closed".
         self.ready_state.set(ReadyState::Closed);
         // Step 2. Update duration to NaN.
@@ -362,7 +370,7 @@ impl MediaSource {
         self.queue_event("sourceclose");
     }
 
-    fn handle_backend_event(&self, _cx: &mut JSContext, event: MediaSourceEvent) {
+    fn handle_backend_event(&self, cx: &mut JSContext, event: MediaSourceEvent) {
         if !self.is_attached() {
             return;
         }
@@ -379,12 +387,10 @@ impl MediaSource {
             // The backend's report of either can arrive after the page has
             // reopened the media source.
             MediaSourceEvent::SourceEnded => {},
-            MediaSourceEvent::SourceClose => {
-                if self.ready_state.get() != ReadyState::Closed {
-                    self.ready_state.set(ReadyState::Closed);
-                    self.queue_event("sourceclose");
-                }
-            },
+            // The backend has closed the media source without the element
+            // detaching it, so its source buffers are gone: the detach steps
+            // remove them here as well.
+            MediaSourceEvent::SourceClose => self.detach(cx),
         }
     }
 
