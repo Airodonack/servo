@@ -224,6 +224,8 @@ skip = [
 [sources.allow-org]
 github = [
     "servo",
+    # The stylo fork the [patch] block in Cargo.toml points at.
+    "Airodonack",
 ]
 
 # On our releases we switch to crates.io dependencies,
