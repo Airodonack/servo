@@ -135,7 +135,7 @@ use crate::flow::inline::text_run::{
 use crate::flow::{
     BlockLevelBox, CollapsibleWithParentStartMargin, FloatSide, PlacementState,
     compute_inline_content_sizes_for_block_level_boxes, layout_block_level_child,
-    skippable_for_block_percentage_quirk,
+    layout_block_level_child_after_clamp_point, skippable_for_block_percentage_quirk,
 };
 use crate::formatting_contexts::{Baselines, IndependentFormattingContext};
 use crate::fragment_tree::{
@@ -222,13 +222,33 @@ impl SharedInlineStyles {
 }
 
 impl BlockLevelBox {
-    fn layout_into_line_items(&self, layout: &mut InlineFormattingContextLayout) {
+    fn layout_into_line_items(
+        &self,
+        layout: &mut InlineFormattingContextLayout,
+        content_follows_in_ifc: bool,
+    ) {
         layout.process_soft_wrap_opportunity();
         layout.commit_current_segment_to_line();
         layout.process_line_break(
             true, /* forced_line_break */
             true, /* for_block_level */
         );
+
+        let mut content_follows_ifc = false;
+        if let Some(state) = layout.sequential_layout_state.as_deref_mut() {
+            if state.is_after_clamp_point() {
+                layout_block_level_child_after_clamp_point(
+                    layout.layout_context,
+                    self,
+                    layout.placement_state.containing_block,
+                );
+                return;
+            }
+            if let Some(line_clamp) = state.line_clamp.as_mut() {
+                content_follows_ifc = line_clamp.content_follows;
+                line_clamp.content_follows |= content_follows_in_ifc;
+            }
+        }
 
         let fragment = layout_block_level_child(
             layout.layout_context,
@@ -239,6 +259,14 @@ impl BlockLevelBox {
             layout.ignore_block_margins_for_stretch,
             true, /* has_inline_parent */
         );
+
+        if let Some(line_clamp) = layout
+            .sequential_layout_state
+            .as_deref_mut()
+            .and_then(|state| state.line_clamp.as_mut())
+        {
+            line_clamp.content_follows = content_follows_ifc;
+        }
 
         let Some(fragment) = fragment.retrieve_box_fragment() else {
             unreachable!("The fragment should be a Fragment::Box()");
@@ -1074,6 +1102,11 @@ struct InlineFormattingContextLayout<'layout_data> {
     /// Whether block-level boxes inside this inline formatting context should ignore their
     /// margins for the purpose of stretching in the block axis.
     ignore_block_margins_for_stretch: LogicalSides1D<bool>,
+
+    /// Whether the line being finished is the last one of this inline formatting context,
+    /// so that, in a line-clamp container, only content after this inline formatting context
+    /// can follow it.
+    finishing_last_line: bool,
 }
 
 impl InlineFormattingContextLayout<'_> {
@@ -1233,6 +1266,7 @@ impl InlineFormattingContextLayout<'_> {
 
         // Finally we finish the line itself and convert all of the LineItems into
         // fragments.
+        self.finishing_last_line = true;
         self.finish_current_line_and_reset(
             true,  /* last_line_or_forced_line_break */
             false, /* for_block_level */
@@ -1247,6 +1281,23 @@ impl InlineFormattingContextLayout<'_> {
         last_line_or_forced_line_break: bool,
         for_block_level: bool,
     ) {
+        // A line holding a block-level box was laid out before the clamp point, even when
+        // the clamp point is inside that box, since block-level boxes after the clamp point
+        // never reach a line.
+        let holds_block_level = self
+            .current_line
+            .line_items
+            .iter()
+            .any(|item| matches!(item, LineItem::BlockLevel(..)));
+        if !holds_block_level &&
+            self.sequential_layout_state
+                .as_ref()
+                .is_some_and(|state| state.is_after_clamp_point()) &&
+            !self.discard_current_line_after_clamp_point(for_block_level)
+        {
+            return;
+        }
+
         let hanging_white_space = self
             .current_line
             .trim_trailing_white_space_and_calculate_hanging(
@@ -1268,7 +1319,6 @@ impl InlineFormattingContextLayout<'_> {
                 hanging_white_space,
                 last_line_or_forced_line_break,
             );
-        let ellipsis = self.ellipsis_for_current_line(inline_start_position, hanging_white_space);
 
         // https://drafts.csswg.org/css-inline-3/#invisible-line-boxes
         // > Line boxes that contain no text, no preserved white space, no inline boxes with non-zero
@@ -1279,6 +1329,13 @@ impl InlineFormattingContextLayout<'_> {
         // > line box and its in-flow content must be treated as not existing for any other layout or
         // > rendering purpose.
         let is_phantom_line = self.current_line.is_phantom();
+        // Only in-flow line boxes count towards the clamp point of a line-clamp container;
+        // a line holding a block-level box is not one, but the lines inside that box are.
+        let counts_for_line_clamp = !is_phantom_line && !self.current_line.for_block_level;
+        let ellipsis = match self.block_ellipsis_for_current_line(counts_for_line_clamp) {
+            Some(block_ellipsis) => Some(block_ellipsis),
+            None => self.ellipsis_for_current_line(inline_start_position, hanging_white_space),
+        };
         if !is_phantom_line {
             self.current_line.start_position.block += self.placement_state.current_margin.solve();
             self.placement_state.current_margin = CollapsedMargin::zero();
@@ -1347,6 +1404,10 @@ impl InlineFormattingContextLayout<'_> {
 
         if line_to_layout.has_floats_waiting_to_be_placed {
             place_pending_floats(self, &line_to_layout.line_items);
+        }
+
+        if counts_for_line_clamp && let Some(state) = self.sequential_layout_state.as_mut() {
+            state.count_line_for_line_clamp();
         }
 
         let start_position = LogicalVec2 {
@@ -1419,6 +1480,71 @@ impl InlineFormattingContextLayout<'_> {
             )));
     }
 
+    /// Drop the content of the line under construction, which is after the clamp point of a
+    /// line-clamp container. Its content is visually suppressed and takes no room:
+    /// <https://drafts.csswg.org/css-overflow-4/#valdef-continue-collapse>
+    ///
+    /// > Visually suppressed content is treated as content hidden by overflow: clip [...] it
+    /// > is not painted, and like ink overflow, does not affect layout or otherwise extend the
+    /// > scrollable overflow area.
+    ///
+    /// Absolutely positioned boxes are kept, as in other engines, on what becomes a phantom
+    /// line at the same block position; returns whether there are any, in which case that line
+    /// still has to be finished. Otherwise a new line is started at the same block position.
+    fn discard_current_line_after_clamp_point(&mut self, for_block_level: bool) -> bool {
+        let start_position = LogicalVec2 {
+            inline: Au::zero(),
+            block: self.current_line.start_position.block,
+        };
+        let line = std::mem::replace(
+            &mut self.current_line,
+            LineUnderConstruction::new(start_position),
+        );
+        self.current_line.cloneable_inline_box_pbm_size = line.cloneable_inline_box_pbm_size;
+        self.current_line.line_items = line
+            .line_items
+            .into_iter()
+            .filter(|item| matches!(item, LineItem::AbsolutelyPositioned(..)))
+            .collect();
+        if !self.current_line.line_items.is_empty() {
+            return true;
+        }
+        self.current_line.for_block_level = for_block_level;
+        if !for_block_level {
+            self.current_line.inline_position += line.cloneable_inline_box_pbm_size.start;
+        }
+        false
+    }
+
+    /// The block overflow ellipsis for the current line, if it is the last line before the
+    /// clamp point of a line-clamp container:
+    /// <https://drafts.csswg.org/css-overflow-4/#block-ellipsis>
+    ///
+    /// > This property allows inserting content into the last line box before a clamp point
+    /// > [...] it is placed at the end of the line box reducing the space available to the
+    /// > other contents of the line.
+    ///
+    /// There is no clamp point after the line when nothing follows it:
+    /// <https://drafts.csswg.org/css-overflow-4/#max-lines>
+    ///
+    /// > if the line-clamp container has exactly N lines, and there are no boxes after the
+    /// > Nth line, then there are no possible clamp points after it, so no block overflow
+    /// > ellipsis is shown.
+    fn block_ellipsis_for_current_line(&self, counts_for_line_clamp: bool) -> Option<LineEllipsis> {
+        if !counts_for_line_clamp {
+            return None;
+        }
+        let line_clamp = self.sequential_layout_state.as_ref()?.line_clamp.as_ref()?;
+        if line_clamp.remaining_lines != 1 ||
+            (self.finishing_last_line && !line_clamp.content_follows)
+        {
+            return None;
+        }
+        let ellipsis_string = line_clamp.ellipsis.as_deref()?;
+        let (line_box_start, line_box_inline_size) = self.current_line_box_start_and_inline_size();
+        self.shape_ellipsis(ellipsis_string, line_box_start + line_box_inline_size)
+    }
+
     fn available_line_space(&self) -> Au {
         match self.current_line.placement_among_floats.get() {
             Some(placement_among_floats) => placement_among_floats.size.inline,
@@ -1429,12 +1555,19 @@ impl InlineFormattingContextLayout<'_> {
     /// The start and the inline size of the line box of the current line, relative to the
     /// containing block, taking into account any floats that shorten it.
     fn current_line_box_start_and_inline_size(&self) -> (Au, Au) {
+        let containing_block_inline_size = self.containing_block().size.inline;
         match self.current_line.placement_among_floats.get() {
+            // A line whose first content is wider than the containing block is placed among
+            // floats with that content's size, but its line box still ends at the containing
+            // block's end edge, which is where `text-overflow` and the block ellipsis go.
             Some(placement_among_floats) => (
                 placement_among_floats.start_corner.inline,
-                placement_among_floats.size.inline,
+                placement_among_floats
+                    .size
+                    .inline
+                    .min(containing_block_inline_size - placement_among_floats.start_corner.inline),
             ),
-            None => (Au::zero(), self.containing_block().size.inline),
+            None => (Au::zero(), containing_block_inline_size),
         }
     }
 
@@ -1498,6 +1631,12 @@ impl InlineFormattingContextLayout<'_> {
             return None;
         }
 
+        self.shape_ellipsis(ellipsis_string, line_box_end)
+    }
+
+    /// Shape `ellipsis_string` in the block container's style, to be placed so that it ends
+    /// at `line_box_end`.
+    fn shape_ellipsis(&self, ellipsis_string: &str, line_box_end: Au) -> Option<LineEllipsis> {
         let font = self.ifc.default_font.clone()?;
         let info = FontAndScriptInfo::simple_for_font(font.clone());
         let shaped_text = font.shape_text(ellipsis_string, &(&info).into());
@@ -2448,9 +2587,10 @@ impl InlineFormattingContext {
             white_space_collapse: style_text.white_space_collapse,
             text_wrap_mode: style_text.text_wrap_mode,
             ignore_block_margins_for_stretch,
+            finishing_last_line: false,
         };
 
-        for item in self.inline_items.iter() {
+        for (index, item) in self.inline_items.iter().enumerate() {
             // Any new box should flush a pending hard line break.
             if !matches!(item, InlineItem::EndInlineBox(..)) {
                 layout.possibly_flush_deferred_forced_line_break();
@@ -2485,7 +2625,9 @@ impl InlineFormattingContext {
                     float_box.borrow().layout_into_line_items(&mut layout);
                 },
                 InlineItem::BlockLevel(block_level) => {
-                    block_level.borrow().layout_into_line_items(&mut layout);
+                    block_level
+                        .borrow()
+                        .layout_into_line_items(&mut layout, self.has_in_flow_content_after(index));
                 },
             }
         }
@@ -2503,6 +2645,17 @@ impl InlineFormattingContext {
             content_inline_size_for_table: None,
             specific_layout_info: None,
         }
+    }
+
+    /// Whether in-flow content follows the item at `index`, so that, in a line-clamp
+    /// container, there is a possible clamp point after the item's last line box.
+    fn has_in_flow_content_after(&self, index: usize) -> bool {
+        self.inline_items[index + 1..].iter().any(|item| {
+            matches!(
+                item,
+                InlineItem::TextRun(..) | InlineItem::Atomic(..) | InlineItem::BlockLevel(..)
+            )
+        })
     }
 
     pub(crate) fn subtree_size(&self) -> usize {

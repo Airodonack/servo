@@ -503,19 +503,20 @@ codegen-units = 1
 # [patch."https://github.com/servo/<repository>"]
 # <crate> = { path = "/path/to/local/checkout" }
 
-# Stylo main plus the fork's two commits (accent-color and the UA-only
-# `-servo-accent-color` keyword; scrollbar-gutter compiled for Servo), from branch
+# Stylo main plus the fork's three commits (accent-color and the UA-only
+# `-servo-accent-color` keyword; scrollbar-gutter compiled for Servo;
+# -webkit-line-clamp and display: -webkit-box for Servo), from branch
 # vodscribe/main of the stylo fork, pinned by rev. Every crate of its workspace
 # is patched together, or two copies of the shared ones get built.
 [patch."https://github.com/servo/stylo"]
-selectors = { git = "https://github.com/Airodonack/stylo", rev = "ef2431c0a8465d6cfe4ab98cdac52e44ae89a153" }
-servo_arc = { git = "https://github.com/Airodonack/stylo", rev = "ef2431c0a8465d6cfe4ab98cdac52e44ae89a153" }
-stylo = { git = "https://github.com/Airodonack/stylo", rev = "ef2431c0a8465d6cfe4ab98cdac52e44ae89a153" }
-stylo_atoms = { git = "https://github.com/Airodonack/stylo", rev = "ef2431c0a8465d6cfe4ab98cdac52e44ae89a153" }
-stylo_derive = { git = "https://github.com/Airodonack/stylo", rev = "ef2431c0a8465d6cfe4ab98cdac52e44ae89a153" }
-stylo_dom = { git = "https://github.com/Airodonack/stylo", rev = "ef2431c0a8465d6cfe4ab98cdac52e44ae89a153" }
-stylo_malloc_size_of = { git = "https://github.com/Airodonack/stylo", rev = "ef2431c0a8465d6cfe4ab98cdac52e44ae89a153" }
-stylo_static_prefs = { git = "https://github.com/Airodonack/stylo", rev = "ef2431c0a8465d6cfe4ab98cdac52e44ae89a153" }
-stylo_traits = { git = "https://github.com/Airodonack/stylo", rev = "ef2431c0a8465d6cfe4ab98cdac52e44ae89a153" }
-to_shmem = { git = "https://github.com/Airodonack/stylo", rev = "ef2431c0a8465d6cfe4ab98cdac52e44ae89a153" }
-to_shmem_derive = { git = "https://github.com/Airodonack/stylo", rev = "ef2431c0a8465d6cfe4ab98cdac52e44ae89a153" }
+selectors = { git = "https://github.com/Airodonack/stylo", rev = "eb9f6ae0500f2415fd9dd224780a55094ef3be18" }
+servo_arc = { git = "https://github.com/Airodonack/stylo", rev = "eb9f6ae0500f2415fd9dd224780a55094ef3be18" }
+stylo = { git = "https://github.com/Airodonack/stylo", rev = "eb9f6ae0500f2415fd9dd224780a55094ef3be18" }
+stylo_atoms = { git = "https://github.com/Airodonack/stylo", rev = "eb9f6ae0500f2415fd9dd224780a55094ef3be18" }
+stylo_derive = { git = "https://github.com/Airodonack/stylo", rev = "eb9f6ae0500f2415fd9dd224780a55094ef3be18" }
+stylo_dom = { git = "https://github.com/Airodonack/stylo", rev = "eb9f6ae0500f2415fd9dd224780a55094ef3be18" }
+stylo_malloc_size_of = { git = "https://github.com/Airodonack/stylo", rev = "eb9f6ae0500f2415fd9dd224780a55094ef3be18" }
+stylo_static_prefs = { git = "https://github.com/Airodonack/stylo", rev = "eb9f6ae0500f2415fd9dd224780a55094ef3be18" }
+stylo_traits = { git = "https://github.com/Airodonack/stylo", rev = "eb9f6ae0500f2415fd9dd224780a55094ef3be18" }
+to_shmem = { git = "https://github.com/Airodonack/stylo", rev = "eb9f6ae0500f2415fd9dd224780a55094ef3be18" }
+to_shmem_derive = { git = "https://github.com/Airodonack/stylo", rev = "eb9f6ae0500f2415fd9dd224780a55094ef3be18" }
