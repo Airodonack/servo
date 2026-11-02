@@ -8035,7 +8035,7 @@ dependencies = [
 [[package]]
 name = "selectors"
 version = "0.41.0"
-source = "git+https://github.com/Airodonack/stylo?rev=e3320a1f1a72f2ed8aca91769b5edfb86c46a543#e3320a1f1a72f2ed8aca91769b5edfb86c46a543"
+source = "git+https://github.com/Airodonack/stylo?rev=5ae7a221216e67947f3662838c5fdd552468c76d#5ae7a221216e67947f3662838c5fdd552468c76d"
 dependencies = [
  "bitflags 2.13.2",
  "cssparser",
@@ -9940,7 +9940,7 @@ dependencies = [
 [[package]]
 name = "servo_arc"
 version = "0.5.0"
-source = "git+https://github.com/Airodonack/stylo?rev=e3320a1f1a72f2ed8aca91769b5edfb86c46a543#e3320a1f1a72f2ed8aca91769b5edfb86c46a543"
+source = "git+https://github.com/Airodonack/stylo?rev=5ae7a221216e67947f3662838c5fdd552468c76d#5ae7a221216e67947f3662838c5fdd552468c76d"
 dependencies = [
  "serde",
  "stable_deref_trait",
@@ -10437,7 +10437,7 @@ dependencies = [
 [[package]]
 name = "stylo"
 version = "0.22.0"
-source = "git+https://github.com/Airodonack/stylo?rev=e3320a1f1a72f2ed8aca91769b5edfb86c46a543#e3320a1f1a72f2ed8aca91769b5edfb86c46a543"
+source = "git+https://github.com/Airodonack/stylo?rev=5ae7a221216e67947f3662838c5fdd552468c76d#5ae7a221216e67947f3662838c5fdd552468c76d"
 dependencies = [
  "app_units",
  "arrayvec",
@@ -10495,7 +10495,7 @@ dependencies = [
 [[package]]
 name = "stylo_atoms"
 version = "0.22.0"
-source = "git+https://github.com/Airodonack/stylo?rev=e3320a1f1a72f2ed8aca91769b5edfb86c46a543#e3320a1f1a72f2ed8aca91769b5edfb86c46a543"
+source = "git+https://github.com/Airodonack/stylo?rev=5ae7a221216e67947f3662838c5fdd552468c76d#5ae7a221216e67947f3662838c5fdd552468c76d"
 dependencies = [
  "string_cache",
  "string_cache_codegen",
@@ -10504,7 +10504,7 @@ dependencies = [
 [[package]]
 name = "stylo_derive"
 version = "0.22.0"
-source = "git+https://github.com/Airodonack/stylo?rev=e3320a1f1a72f2ed8aca91769b5edfb86c46a543#e3320a1f1a72f2ed8aca91769b5edfb86c46a543"
+source = "git+https://github.com/Airodonack/stylo?rev=5ae7a221216e67947f3662838c5fdd552468c76d#5ae7a221216e67947f3662838c5fdd552468c76d"
 dependencies = [
  "darling 0.20.11",
  "proc-macro2",
@@ -10516,7 +10516,7 @@ dependencies = [
 [[package]]
 name = "stylo_dom"
 version = "0.22.0"
-source = "git+https://github.com/Airodonack/stylo?rev=e3320a1f1a72f2ed8aca91769b5edfb86c46a543#e3320a1f1a72f2ed8aca91769b5edfb86c46a543"
+source = "git+https://github.com/Airodonack/stylo?rev=5ae7a221216e67947f3662838c5fdd552468c76d#5ae7a221216e67947f3662838c5fdd552468c76d"
 dependencies = [
  "bitflags 2.13.2",
  "stylo_malloc_size_of",
@@ -10525,7 +10525,7 @@ dependencies = [
 [[package]]
 name = "stylo_malloc_size_of"
 version = "0.22.0"
-source = "git+https://github.com/Airodonack/stylo?rev=e3320a1f1a72f2ed8aca91769b5edfb86c46a543#e3320a1f1a72f2ed8aca91769b5edfb86c46a543"
+source = "git+https://github.com/Airodonack/stylo?rev=5ae7a221216e67947f3662838c5fdd552468c76d#5ae7a221216e67947f3662838c5fdd552468c76d"
 dependencies = [
  "app_units",
  "cssparser",
@@ -10544,7 +10544,7 @@ dependencies = [
 [[package]]
 name = "stylo_static_prefs"
 version = "0.22.0"
-source = "git+https://github.com/Airodonack/stylo?rev=e3320a1f1a72f2ed8aca91769b5edfb86c46a543#e3320a1f1a72f2ed8aca91769b5edfb86c46a543"
+source = "git+https://github.com/Airodonack/stylo?rev=5ae7a221216e67947f3662838c5fdd552468c76d#5ae7a221216e67947f3662838c5fdd552468c76d"
 dependencies = [
  "toml 1.1.8+spec-1.1.0",
 ]
@@ -10552,7 +10552,7 @@ dependencies = [
 [[package]]
 name = "stylo_traits"
 version = "0.22.0"
-source = "git+https://github.com/Airodonack/stylo?rev=e3320a1f1a72f2ed8aca91769b5edfb86c46a543#e3320a1f1a72f2ed8aca91769b5edfb86c46a543"
+source = "git+https://github.com/Airodonack/stylo?rev=5ae7a221216e67947f3662838c5fdd552468c76d#5ae7a221216e67947f3662838c5fdd552468c76d"
 dependencies = [
  "app_units",
  "bitflags 2.13.2",
@@ -10964,7 +10964,7 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 [[package]]
 name = "to_shmem"
 version = "0.6.0"
-source = "git+https://github.com/Airodonack/stylo?rev=e3320a1f1a72f2ed8aca91769b5edfb86c46a543#e3320a1f1a72f2ed8aca91769b5edfb86c46a543"
+source = "git+https://github.com/Airodonack/stylo?rev=5ae7a221216e67947f3662838c5fdd552468c76d#5ae7a221216e67947f3662838c5fdd552468c76d"
 dependencies = [
  "cssparser",
  "hashbrown 0.17.1",
@@ -10978,7 +10978,7 @@ dependencies = [
 [[package]]
 name = "to_shmem_derive"
 version = "0.2.0"
-source = "git+https://github.com/Airodonack/stylo?rev=e3320a1f1a72f2ed8aca91769b5edfb86c46a543#e3320a1f1a72f2ed8aca91769b5edfb86c46a543"
+source = "git+https://github.com/Airodonack/stylo?rev=5ae7a221216e67947f3662838c5fdd552468c76d#5ae7a221216e67947f3662838c5fdd552468c76d"
 dependencies = [
  "darling 0.20.11",
  "proc-macro2",

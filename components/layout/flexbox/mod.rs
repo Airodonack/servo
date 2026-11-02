@@ -12,8 +12,9 @@ use style::properties::ComputedValues;
 use style::properties::longhands::align_items::computed_value::T as AlignItems;
 use style::properties::longhands::flex_direction::computed_value::T as FlexDirection;
 use style::properties::longhands::flex_wrap::computed_value::T as FlexWrap;
-use style::values::computed::ContentDistribution;
+use style::values::computed::{BoxOrient, ContentDistribution};
 use style::values::specified::align::AlignFlags;
+use style::values::specified::box_::DisplayInside as StyloDisplayInside;
 
 use crate::PropagatedBoxTreeData;
 use crate::cell::ArcRefCell;
@@ -48,7 +49,17 @@ pub(crate) struct FlexContainerConfig {
 
 impl FlexContainerConfig {
     fn new(container_style: &ComputedValues) -> FlexContainerConfig {
-        let flex_direction = container_style.slow_clone_flex_direction();
+        // A legacy `-webkit-box` takes its direction from `-webkit-box-orient`, not from
+        // `flex-direction`.
+        let flex_direction =
+            if container_style.get_box().display.inside() == StyloDisplayInside::WebkitBox {
+                match container_style.get_xul()._moz_box_orient {
+                    BoxOrient::Horizontal => FlexDirection::Row,
+                    BoxOrient::Vertical => FlexDirection::Column,
+                }
+            } else {
+                container_style.slow_clone_flex_direction()
+            };
         let flex_axis = FlexAxis::from(flex_direction);
         let flex_wrap = container_style.get_position().flex_wrap;
         let container_is_single_line = match flex_wrap {
