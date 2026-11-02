@@ -85,6 +85,7 @@ use crate::dom::animation::Animation;
 use crate::dom::animations::keyframeeffect::KeyframeEffect;
 use crate::dom::attr::{Attr, is_relevant_attribute};
 use crate::dom::bindings::cell::AtomicSafeBorrowMut;
+use crate::dom::bindings::codegen::Bindings::AnimatableBinding::GetAnimationsOptions;
 use crate::dom::bindings::codegen::Bindings::AttrBinding::AttrMethods;
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
 use crate::dom::bindings::codegen::Bindings::ElementBinding::{
@@ -4829,13 +4830,15 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         //
         // If the above procedure causes an exception to be thrown, propagate the exception and
         // abort this procedure.
-        let parent_options = match options {
-            UnrestrictedDoubleOrKeyframeAnimationOptions::UnrestrictedDouble(value) => {
-                UnrestrictedDoubleOrKeyframeEffectOptions::UnrestrictedDouble(value)
-            },
-            UnrestrictedDoubleOrKeyframeAnimationOptions::KeyframeAnimationOptions(options) => {
-                UnrestrictedDoubleOrKeyframeEffectOptions::KeyframeEffectOptions(options.parent)
-            },
+        let (parent_options, id) = match options {
+            UnrestrictedDoubleOrKeyframeAnimationOptions::UnrestrictedDouble(value) => (
+                UnrestrictedDoubleOrKeyframeEffectOptions::UnrestrictedDouble(value),
+                None,
+            ),
+            UnrestrictedDoubleOrKeyframeAnimationOptions::KeyframeAnimationOptions(options) => (
+                UnrestrictedDoubleOrKeyframeEffectOptions::KeyframeEffectOptions(options.parent),
+                Some(options.id),
+            ),
         };
         let effect = KeyframeEffect::Constructor(
             cx,
@@ -4857,13 +4860,45 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
             Some(Some(&timeline)),
         );
 
-        // TODO: Step 5. If options is a KeyframeAnimationOptions object, assign the value of the id member of options
+        // Step 5. If options is a KeyframeAnimationOptions object, assign the value of the id member of options
         // to animation’s id attribute.
+        if let Some(id) = id {
+            animation.set_id(id);
+        }
 
-        // TODO: Step 6. Run the procedure to play an animation for animation with the auto-rewind flag set to true.
+        // Step 6. Run the procedure to play an animation for animation with the auto-rewind flag set to true.
+        animation.play_an_animation(cx, true)?;
 
         // Step 7. Return animation.
         Ok(animation)
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#dom-animatable-getanimations>
+    fn GetAnimations(&self, options: &GetAnimationsOptions) -> Vec<DomRoot<Animation>> {
+        // > Returns the set of relevant animations for this object, or, if an options parameter
+        // > is passed with subtree set to true, returns the set of relevant animations for a
+        // > subtree for this object. The returned list is sorted using the composite order
+        // > described for the associated animations of effects in § 5.4.2 The effect stack.
+        //
+        // Animations only target elements so far, so a pseudoElement option matches none.
+        if options
+            .pseudoElement
+            .as_ref()
+            .is_some_and(|pseudo_element| !pseudo_element.is_empty())
+        {
+            return Vec::new();
+        }
+        let document = self.owner_document();
+        let node = self.upcast::<Node>();
+        document
+            .animation_manager()
+            .relevant_web_animations(|target| {
+                if options.subtree {
+                    node.is_inclusive_ancestor_of(target.upcast())
+                } else {
+                    target == self
+                }
+            })
     }
 }
 

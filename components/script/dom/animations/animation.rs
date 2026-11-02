@@ -14,6 +14,7 @@
 //! [`AnimationManager::update_web_animations`]: crate::dom::document::animation_manager::AnimationManager::update_web_animations
 
 use std::cell::Cell;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use dom_struct::dom_struct;
 use js::context::JSContext;
@@ -32,15 +33,18 @@ use stylo_atoms::Atom;
 use crate::dom::animationeffect::AnimationEffect;
 use crate::dom::animationplaybackevent::AnimationPlaybackEvent;
 use crate::dom::bindings::codegen::Bindings::AnimationBinding::{
-    AnimationMethods, AnimationPlayState,
+    AnimationMethods, AnimationPlayState, AnimationReplaceState,
 };
 use crate::dom::bindings::codegen::Bindings::AnimationTimelineBinding::AnimationTimelineMethods;
 use crate::dom::bindings::refcounted::Trusted;
 use crate::dom::bindings::reflector::DomGlobal;
 use crate::dom::bindings::root::MutNullableDom;
 use crate::dom::document::Document;
+use crate::dom::element::Element;
 use crate::dom::eventtarget::EventTarget;
 use crate::dom::globalscope::GlobalScope;
+use crate::dom::keyframeeffect::KeyframeEffect;
+use crate::dom::node::Node;
 use crate::dom::promise::{Promise, RootedPromise, TracedPromise};
 use crate::dom::types::{AnimationTimeline, DocumentTimeline};
 use crate::dom::window::Window;
@@ -65,6 +69,7 @@ enum PendingTask {
 pub(crate) enum PlaybackEventType {
     Finish,
     Cancel,
+    Remove,
 }
 
 impl PlaybackEventType {
@@ -72,9 +77,16 @@ impl PlaybackEventType {
         match self {
             PlaybackEventType::Finish => Atom::from("finish"),
             PlaybackEventType::Cancel => atom!("cancel"),
+            PlaybackEventType::Remove => Atom::from("remove"),
         }
     }
 }
+
+/// The next position in the global animation list
+/// (<https://drafts.csswg.org/web-animations-1/#global-animation-list>):
+/// > In order to establish the relative ordering of conflicting animations, animations are
+/// > appended to a global animation list in the order in which they are created.
+static NEXT_POSITION_IN_GLOBAL_ANIMATION_LIST: AtomicU64 = AtomicU64::new(0);
 
 /// <https://drafts.csswg.org/web-animations-1/#animation>
 #[dom_struct]
@@ -123,6 +135,13 @@ pub(crate) struct Animation {
     /// Whether the document for timing is keeping this animation in its list of animations
     /// to update on each animation frame.
     tracked_by_document: Cell<bool>,
+
+    /// The position of this animation in the global animation list, which is its composite
+    /// order among the animations created through the API.
+    position_in_global_animation_list: u64,
+
+    /// <https://drafts.csswg.org/web-animations-1/#animation-replace-state>
+    replace_state: Cell<AnimationReplaceState>,
 }
 
 impl Animation {
@@ -143,7 +162,109 @@ impl Animation {
             finish_notification_queued: Cell::new(false),
             finish_notification_generation: Cell::new(0),
             tracked_by_document: Cell::new(false),
+            position_in_global_animation_list: NEXT_POSITION_IN_GLOBAL_ANIMATION_LIST
+                .fetch_add(1, Ordering::Relaxed),
+            // > The initial value of an animation’s replace state is active.
+            replace_state: Cell::new(AnimationReplaceState::Active),
         }
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#animation-composite-order>
+    ///
+    /// > Sort A and B based on their position in the global animation list.
+    pub(crate) fn composite_order(&self) -> u64 {
+        self.position_in_global_animation_list
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#effect-target-target-element>
+    pub(crate) fn effect_target(&self) -> Option<DomRoot<Element>> {
+        self.associated_effect
+            .get()?
+            .downcast::<KeyframeEffect>()?
+            .target()
+    }
+
+    /// The longhands the associated effect animates.
+    pub(crate) fn effect_target_properties(&self) -> Vec<style::properties::LonghandId> {
+        self.associated_effect
+            .get()
+            .and_then(|effect| {
+                effect
+                    .downcast::<KeyframeEffect>()
+                    .map(|effect| effect.target_properties())
+            })
+            .unwrap_or_default()
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#relevant>
+    pub(crate) fn is_relevant(&self) -> bool {
+        // > An animation is relevant if: Its associated effect is current or in effect, and Its
+        // > replace state is not removed.
+        self.replace_state.get() != AnimationReplaceState::Removed &&
+            self.associated_effect
+                .get()
+                .is_some_and(|effect| effect.is_current() || effect.is_in_effect())
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#replaceable-animation>
+    pub(crate) fn is_replaceable(&self) -> bool {
+        // > An animation is replaceable if all of the following conditions are true: The
+        // > existence of the animation is not prescribed by markup. ... The animation’s play
+        // > state is finished. The animation’s replace state is not removed. The animation is
+        // > associated with a monotonically increasing timeline. The animation has an associated
+        // > effect. The animation’s associated effect is in effect. The animation’s associated
+        // > effect has an effect target.
+        //
+        // Every animation here was created through the API, and every timeline is a document
+        // timeline.
+        self.play_state() == AnimationPlayState::Finished &&
+            self.replace_state.get() != AnimationReplaceState::Removed &&
+            self.timeline.get().is_some() &&
+            self.associated_effect
+                .get()
+                .is_some_and(|effect| effect.is_in_effect()) &&
+            self.effect_target().is_some()
+    }
+
+    pub(crate) fn replace_state(&self) -> AnimationReplaceState {
+        self.replace_state.get()
+    }
+
+    /// The steps for one animation of
+    /// <https://drafts.csswg.org/web-animations-1/#remove-replaced-animations>.
+    pub(crate) fn remove_as_replaced(&self) {
+        // > 1. Set animation’s replace state to removed.
+        self.replace_state.set(AnimationReplaceState::Removed);
+
+        // > 2. Create an AnimationPlaybackEvent, removeEvent. 3. Set removeEvent’s type attribute
+        // > to remove. 4. Set removeEvent’s currentTime attribute to the current time of
+        // > animation. 5. Set removeEvent’s timelineTime attribute to the current time of the
+        // > timeline with which animation is associated. 6. If animation has a document for
+        // > timing, then append removeEvent to its document for timing’s pending animation event
+        // > queue along with its target, animation. For the scheduled event time, use the result
+        // > of applying the procedure to convert timeline time to origin-relative time to the
+        // > current time of the timeline with which animation is associated. Otherwise, queue a
+        // > task to dispatch removeEvent at animation. The task source for this task is the DOM
+        // > manipulation task source.
+        let timeline_time = self.timeline_time();
+        self.queue_playback_event(
+            PlaybackEventType::Remove,
+            self.current_time(),
+            timeline_time,
+            timeline_time.map(|time| time + self.timeline_origin_time()),
+        );
+    }
+
+    /// The origin time of the timeline, which is zero for the default document timeline.
+    fn timeline_origin_time(&self) -> f64 {
+        self.timeline
+            .get()
+            .and_then(|timeline| {
+                timeline
+                    .downcast::<DocumentTimeline>()
+                    .map(|timeline| timeline.origin_time_in_milliseconds())
+            })
+            .unwrap_or(0.0)
     }
 
     fn new_with_proto(
@@ -296,9 +417,16 @@ impl Animation {
             self.play_state() == AnimationPlayState::Running
     }
 
-    /// Whether the document for timing has to keep this animation in its list of animations.
+    /// Whether the document for timing has to keep this animation in its list of animations:
+    /// while it can change without a call from script, and while it is relevant to an element
+    /// in the document, because that list is where getAnimations() and the removal of replaced
+    /// animations find animations. A filling animation of an element that left the document is
+    /// let go, so that the list does not keep removed elements alive.
     pub(crate) fn needs_tracking(&self) -> bool {
-        self.needs_animation_frames()
+        self.needs_animation_frames() ||
+            (self.is_relevant() &&
+                self.effect_target()
+                    .is_some_and(|target| target.upcast::<Node>().is_connected()))
     }
 
     pub(crate) fn set_tracked_by_document(&self, tracked: bool) {
@@ -1012,11 +1140,8 @@ impl Animation {
 
         // Converting a timeline time to an origin-relative time: the default document timeline
         // has an origin time of zero, and other document timelines are offset from it.
-        let timeline = self.timeline.get()?;
-        let origin_time = timeline
-            .downcast::<DocumentTimeline>()
-            .map_or(0.0, |timeline| timeline.origin_time_in_milliseconds());
-        Some(timeline_time + origin_time)
+        self.timeline.get()?;
+        Some(timeline_time + self.timeline_origin_time())
     }
 
     /// Queue an [`AnimationPlaybackEvent`] for this animation: in the pending animation event
@@ -1112,20 +1237,11 @@ impl Animation {
             // dispatch cancelEvent at animation. The task source for this task is the DOM
             // manipulation task source.
             let timeline_time = self.timeline_time();
-            let origin_time = self
-                .timeline
-                .get()
-                .and_then(|timeline| {
-                    timeline
-                        .downcast::<DocumentTimeline>()
-                        .map(|timeline| timeline.origin_time_in_milliseconds())
-                })
-                .unwrap_or(0.0);
             self.queue_playback_event(
                 PlaybackEventType::Cancel,
                 None,
                 timeline_time,
-                timeline_time.map(|time| time + origin_time),
+                timeline_time.map(|time| time + self.timeline_origin_time()),
             );
         }
 
@@ -1486,6 +1602,21 @@ impl AnimationMethods<crate::DomTypeHolder> for Animation {
 
     // <https://drafts.csswg.org/web-animations-1/#dom-animation-oncancel>
     event_handler!(cancel, GetOncancel, SetOncancel);
+
+    // <https://drafts.csswg.org/web-animations-1/#dom-animation-onremove>
+    event_handler!(remove, GetOnremove, SetOnremove);
+
+    /// <https://drafts.csswg.org/web-animations-1/#dom-animation-replacestate>
+    fn ReplaceState(&self) -> AnimationReplaceState {
+        // > The replace state of this animation.
+        self.replace_state.get()
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#dom-animation-persist>
+    fn Persist(&self) {
+        // > Sets this animation’s replace state to persisted.
+        self.replace_state.set(AnimationReplaceState::Persisted);
+    }
 
     /// <https://drafts.csswg.org/web-animations-1/#dom-animation-cancel>
     fn Cancel(&self, cx: &mut JSContext) {

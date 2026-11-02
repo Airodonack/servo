@@ -97,6 +97,32 @@ impl KeyframeEffect {
     pub(crate) fn new(cx: &mut JSContext, window: &Window) -> DomRoot<Self> {
         Self::new_with_proto(cx, window, None)
     }
+
+    /// <https://drafts.csswg.org/web-animations-1/#effect-target-target-element>
+    pub(crate) fn target(&self) -> Option<DomRoot<Element>> {
+        self.target_element.get()
+    }
+
+    /// The longhands this effect animates
+    /// (<https://drafts.csswg.org/web-animations-1/#target-property>).
+    pub(crate) fn target_properties(&self) -> Vec<LonghandId> {
+        let mut properties = Vec::new();
+        for keyframe in self.keyframes.borrow().iter() {
+            for declaration in &keyframe.declarations {
+                for longhand in declaration
+                    .block
+                    .declarations()
+                    .iter()
+                    .filter_map(|declaration| declaration.id().as_longhand())
+                {
+                    if !properties.contains(&longhand) {
+                        properties.push(longhand);
+                    }
+                }
+            }
+        }
+        properties
+    }
 }
 
 impl KeyframeEffectMethods<crate::DomTypeHolder> for KeyframeEffect {
@@ -163,6 +189,24 @@ impl KeyframeEffectMethods<crate::DomTypeHolder> for KeyframeEffect {
         effect.SetKeyframes(cx, keyframes);
 
         Ok(effect)
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#dom-keyframeeffect-target>
+    fn GetTarget(&self) -> Option<DomRoot<Element>> {
+        // > The target element being animated by this object (either the effect target if it is
+        // > an Element or its originating element if it is a pseudo-element).
+        self.target_element.get()
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#dom-keyframeeffect-target>
+    fn SetTarget(&self, cx: &mut JSContext, target: Option<&Element>) {
+        self.target_element.set(target);
+
+        // A new target can make the associated animation relevant to another element, which the
+        // document finds through its list of animations.
+        if let Some(animation) = self.upcast::<AnimationEffect>().associated_animation() {
+            animation.update_finished_state(cx, false, false);
+        }
     }
 
     /// <https://drafts.csswg.org/web-animations-1/#dom-keyframeeffect-getkeyframes>
