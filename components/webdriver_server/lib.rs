@@ -15,7 +15,7 @@ mod user_prompt;
 
 use std::borrow::ToOwned;
 use std::cell::LazyCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::net::{IpAddr, SocketAddr};
 use std::thread::sleep;
@@ -296,11 +296,10 @@ impl Serialize for SendableJSValue {
                 .map(|element| SendableJSValue(element.clone()))
                 .collect::<Vec<SendableJSValue>>()
                 .serialize(serializer),
-            JSValue::Object(ref x) => x
-                .iter()
-                .map(|(k, v)| (k.clone(), SendableJSValue(v.clone())))
-                .collect::<HashMap<String, SendableJSValue>>()
-                .serialize(serializer),
+            // Keep the object's own property order, as the WebDriver JSON clone does.
+            JSValue::Object(ref x) => {
+                serializer.collect_map(x.iter().map(|(k, v)| (k, SendableJSValue(v.clone()))))
+            },
         }
     }
 }

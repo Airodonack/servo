@@ -25,7 +25,7 @@ keyboard-types = { workspace = true }
 log = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order"] }
 servo-base = { workspace = true }
 servo-config = { workspace = true }
 servo-geometry = { workspace = true }

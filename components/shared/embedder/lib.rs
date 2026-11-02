@@ -15,7 +15,6 @@ pub mod resources;
 pub mod user_contents;
 pub mod webdriver;
 
-use std::collections::HashMap;
 use std::ffi::c_void;
 use std::fmt::{Debug, Display, Error, Formatter};
 use std::hash::Hash;
@@ -27,6 +26,7 @@ use content_security_policy::Destination;
 use crossbeam_channel::Sender;
 use euclid::{Box2D, Point2D, Scale, Size2D, Vector2D};
 use http::{HeaderMap, Method, StatusCode};
+use indexmap::IndexMap;
 use log::warn;
 use malloc_size_of::malloc_size_of_is_0;
 use malloc_size_of_derive::MallocSizeOf;
@@ -1059,7 +1059,8 @@ pub enum JSValue {
     Frame(String),
     Window(String),
     Array(Vec<JSValue>),
-    Object(HashMap<String, JSValue>),
+    /// An object's own properties, in JavaScript's property order.
+    Object(IndexMap<String, JSValue>),
 }
 
 /// Information about a JavaScript error that occured during the evaluation of a script.
