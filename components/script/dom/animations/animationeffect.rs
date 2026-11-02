@@ -18,7 +18,7 @@ use script_bindings::root::{Dom, DomRoot};
 use script_bindings::str::DOMString;
 use style::parser::Parse;
 use style::stylesheets::CssRuleType;
-use style::values::generics::easing::TimingKeyword;
+use style::values::generics::easing::{BeforeFlag, TimingKeyword};
 use style::values::specified::TimingFunction;
 use style_traits::{ParsingMode, ToCss};
 
@@ -76,14 +76,13 @@ impl AnimationEffect {
             reflector: Reflector::new(),
             window: Dom::from_ref(window),
 
-            // The default values of the timing properties specified here don't matter.
-            // There is no way to construct a AnimationEffect without subsequently initializing them,
-            // even if they're not passed to the constructor.
+            // The defaults of the EffectTiming dictionary. The constructors assign the timing
+            // they are given over them.
             specified_timing_properties: DomRefCell::new(SpecifiedTimingProperties {
                 start_delay: Default::default(),
                 end_delay: Default::default(),
-                fill_mode: FillMode::None,
-                iteration_count: Default::default(),
+                fill_mode: FillMode::Auto,
+                iteration_count: 1.0,
                 iteration_start: Default::default(),
                 iteration_duration: IterationDurationOrAuto::Auto,
                 playback_direction: PlaybackDirection::Normal,
@@ -116,6 +115,226 @@ impl AnimationEffect {
 
         // > active duration = iteration duration × iteration count
         iteration_duration * timing.iteration_count
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#local-time>
+    pub(crate) fn local_time(&self) -> Option<f64> {
+        // > If the animation effect is associated with an animation, the local time is the
+        // > current time of the animation. Otherwise, the local time is unresolved.
+        self.associated_animation()?.current_time()
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#animation-effect-phases-and-states>
+    ///
+    /// `None` is the idle phase: the local time is unresolved.
+    pub(crate) fn phase(&self, local_time: Option<f64>) -> Option<Phase> {
+        let local_time = local_time?;
+        let start_delay = *self.specified_timing_properties.borrow().start_delay;
+        let active_duration = self.active_duration();
+        let end_time = self.end_time();
+
+        // > animation direction: “backwards” if the effect is associated with an animation and
+        // > the associated animation’s playback rate is less than zero; in all other cases, the
+        // > animation direction is “forward”.
+        let backwards = self
+            .associated_animation()
+            .is_some_and(|animation| animation.playback_rate() < 0.0);
+
+        // > before-active boundary time: max(min(start delay, end time), 0)
+        let before_active_boundary_time = start_delay.min(end_time).max(0.0);
+
+        // > active-after boundary time: max(min(start delay + active duration, end time), 0)
+        let active_after_boundary_time = (start_delay + active_duration).min(end_time).max(0.0);
+
+        // > An animation effect is in the before phase if the animation effect’s local time is
+        // > not unresolved and either of the following conditions are met: the local time is
+        // > less than the before-active boundary time, or the animation direction is
+        // > “backwards”, the endpoint-inclusive active interval flag is false, and the local time
+        // > is equal to the before-active boundary time.
+        if local_time < before_active_boundary_time ||
+            (backwards && local_time == before_active_boundary_time)
+        {
+            return Some(Phase::Before);
+        }
+
+        // > An animation effect is in the after phase if the animation effect’s local time is
+        // > not unresolved and either of the following conditions are met: the local time is
+        // > greater than the active-after boundary time, or the animation direction is
+        // > “forwards”, the endpoint-inclusive active interval flag is false, and the local time
+        // > is equal to the active-after boundary time.
+        if local_time > active_after_boundary_time ||
+            (!backwards && local_time == active_after_boundary_time)
+        {
+            return Some(Phase::After);
+        }
+
+        // > An animation effect is in the active phase if the animation effect’s local time is
+        // > not unresolved and it is neither in the before phase nor in the after phase.
+        Some(Phase::Active)
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#calculating-the-active-time>
+    fn active_time(&self, local_time: Option<f64>, phase: Option<Phase>) -> Option<f64> {
+        let local_time = local_time?;
+        let (start_delay, fill_mode) = {
+            let timing = self.specified_timing_properties.borrow();
+            (*timing.start_delay, timing.fill_mode)
+        };
+        match phase? {
+            // > If the animation effect is in the before phase, ... If the fill mode is
+            // > backwards or both, Return the result of evaluating max(local time - start delay,
+            // > 0). Otherwise, Return an unresolved time value.
+            Phase::Before => matches!(fill_mode, FillMode::Backwards | FillMode::Both)
+                .then(|| (local_time - start_delay).max(0.0)),
+            // > If the animation effect is in the active phase, Return the result of evaluating
+            // > local time - start delay.
+            Phase::Active => Some(local_time - start_delay),
+            // > If the animation effect is in the after phase, ... If the fill mode is forwards
+            // > or both, Return the result of evaluating max(min(local time - start delay,
+            // > active duration), 0). Otherwise, Return an unresolved time value.
+            Phase::After => matches!(fill_mode, FillMode::Forwards | FillMode::Both).then(|| {
+                (local_time - start_delay)
+                    .min(self.active_duration())
+                    .max(0.0)
+            }),
+        }
+    }
+
+    /// The timing model's values at the current local time, from
+    /// <https://drafts.csswg.org/web-animations-1/#calculating-progress>.
+    fn calculated_timing(&self) -> CalculatedTiming {
+        let local_time = self.local_time();
+        let phase = self.phase(local_time);
+        let active_time = self.active_time(local_time, phase);
+        let timing = self.specified_timing_properties.borrow();
+        let iteration_duration = timing.iteration_duration.computed_value();
+        let iteration_count = timing.iteration_count;
+        let iteration_start = *timing.iteration_start;
+        let active_duration = self.active_duration();
+
+        // <https://drafts.csswg.org/web-animations-1/#calculating-the-overall-progress>
+        // > If the active time is unresolved, return unresolved.
+        let overall_progress = active_time.map(|active_time| {
+            // > If the iteration duration is zero, If the animation effect is in the before
+            // > phase, let overall progress be zero; otherwise, let it be equal to the iteration
+            // > count. Otherwise, Let overall progress be the result of calculating active time
+            // > / iteration duration.
+            let overall_progress = if iteration_duration == 0.0 {
+                if phase == Some(Phase::Before) {
+                    0.0
+                } else {
+                    iteration_count
+                }
+            } else {
+                active_time / iteration_duration
+            };
+            // > Return the result of calculating overall progress + iteration start.
+            overall_progress + iteration_start
+        });
+
+        // <https://drafts.csswg.org/web-animations-1/#calculating-the-simple-iteration-progress>
+        // > If the overall progress is unresolved, return unresolved.
+        let simple_iteration_progress = overall_progress.map(|overall_progress| {
+            // > If overall progress is infinity, let the simple iteration progress be iteration
+            // > start % 1.0; otherwise, let the simple iteration progress be overall progress %
+            // > 1.0.
+            let simple_iteration_progress = if overall_progress.is_infinite() {
+                iteration_start % 1.0
+            } else {
+                overall_progress % 1.0
+            };
+            // > If all of the following conditions are true: the simple iteration progress
+            // > calculated above is zero, and the animation effect is in the active phase or the
+            // > after phase, and the active time is equal to the active duration, and the
+            // > iteration count is not equal to zero. Let the simple iteration progress be 1.0.
+            if simple_iteration_progress == 0.0 &&
+                matches!(phase, Some(Phase::Active | Phase::After)) &&
+                active_time == Some(active_duration) &&
+                iteration_count != 0.0
+            {
+                1.0
+            } else {
+                simple_iteration_progress
+            }
+        });
+
+        // <https://drafts.csswg.org/web-animations-1/#calculating-the-current-iteration>
+        // > If the active time is unresolved, return unresolved.
+        let current_iteration = overall_progress.map(|overall_progress| {
+            // > If the animation effect is in the after phase and the iteration count is
+            // > infinity, return infinity.
+            if phase == Some(Phase::After) && iteration_count == f64::INFINITY {
+                return f64::INFINITY;
+            }
+            // > If the simple iteration progress is 1.0, return floor(overall progress) - 1.
+            // > Otherwise, return floor(overall progress).
+            if simple_iteration_progress == Some(1.0) {
+                overall_progress.floor() - 1.0
+            } else {
+                overall_progress.floor()
+            }
+        });
+
+        // <https://drafts.csswg.org/web-animations-1/#calculating-the-directed-progress>
+        // > Calculate the current direction using the first matching condition from the
+        // > following list:
+        let going_forwards = match timing.playback_direction {
+            // > If playback direction is normal, Let the current direction be forwards.
+            PlaybackDirection::Normal => true,
+            // > If playback direction is reverse, Let the current direction be reverse.
+            PlaybackDirection::Reverse => false,
+            // > Otherwise (the playback direction is alternate or alternate-reverse), Let d be
+            // > the current iteration index. If playback direction is alternate-reverse
+            // > increment d by 1. If d % 2 == 0, let the current direction be forwards; otherwise
+            // > let the current direction be reverse. If d is infinity, let the current direction
+            // > be forwards.
+            PlaybackDirection::Alternate | PlaybackDirection::Alternate_reverse => {
+                let mut d = current_iteration.unwrap_or(0.0);
+                if timing.playback_direction == PlaybackDirection::Alternate_reverse {
+                    d += 1.0;
+                }
+                d.is_infinite() || d % 2.0 == 0.0
+            },
+        };
+        // > If the simple iteration progress is unresolved, return unresolved. ... If the current
+        // > direction is forwards then return the simple iteration progress. Otherwise, return
+        // > 1.0 - simple iteration progress.
+        let directed_progress = simple_iteration_progress.map(|progress| {
+            if going_forwards {
+                progress
+            } else {
+                1.0 - progress
+            }
+        });
+
+        // <https://drafts.csswg.org/web-animations-1/#calculating-the-transformed-progress>
+        // > If the directed progress is unresolved, return unresolved. ... The before flag is set
+        // > if the animation effect is in the before phase and going forwards is true; or if the
+        // > animation effect is in the after phase and going forwards is false. Return the result
+        // > of evaluating the effect easing function passing directed progress as the input
+        // > progress value and before flag as the before flag.
+        let before_flag = if (phase == Some(Phase::Before) && going_forwards) ||
+            (phase == Some(Phase::After) && !going_forwards)
+        {
+            BeforeFlag::Set
+        } else {
+            BeforeFlag::Unset
+        };
+        // getComputedTiming().progress is compared against the exact curve, so solve the
+        // bezier closely, finer than the precision stylo uses to paint CSS animations.
+        let epsilon = 1e-7;
+        let transformed_progress = directed_progress.map(|progress| {
+            timing
+                .easing_function
+                .to_computed_value_without_context()
+                .calculate_output(progress, before_flag, epsilon)
+        });
+
+        CalculatedTiming {
+            local_time,
+            transformed_progress,
+            current_iteration,
+        }
     }
 
     /// <https://drafts.csswg.org/web-animations-1/#end-time>
@@ -206,7 +425,9 @@ impl AnimationEffect {
                     ParsingMode::DEFAULT,
                     &urlextradata,
                 );
-                TimingFunction::parse(&parser_context, &mut parser).map_err(|_| ())
+                parser
+                    .parse_entirely(|parser| TimingFunction::parse(&parser_context, parser))
+                    .map_err(|_| ())
             })
             .transpose()
         else {
@@ -316,6 +537,7 @@ impl AnimationEffectMethods<crate::DomTypeHolder> for AnimationEffect {
             specified_timing_properties.fill_mode
         };
 
+        let calculated_timing = self.calculated_timing();
         ComputedEffectTiming {
             parent: EffectTiming {
                 delay: specified_timing_properties.start_delay,
@@ -330,12 +552,22 @@ impl AnimationEffectMethods<crate::DomTypeHolder> for AnimationEffect {
                 iterationStart: specified_timing_properties.iteration_start,
                 iterations: specified_timing_properties.iteration_count,
             },
-            // FIXME: These are just placeholder values
-            endTime: None,
-            activeDuration: None,
-            localTime: None,
-            progress: None,
-            currentIteration: None,
+            // > endTime: The end time of the animation effect expressed in milliseconds since
+            // > zero local time
+            endTime: Some(self.end_time()),
+            // > activeDuration: The active duration of this animation effect.
+            activeDuration: Some(self.active_duration()),
+            // > localTime: The local time of this animation effect. This will be null if this
+            // > animation effect is not associated with an animation.
+            localTime: Some(calculated_timing.local_time.and_then(Finite::new)),
+            // > progress: The current iteration progress of this animation effect.
+            progress: Some(calculated_timing.transformed_progress.and_then(Finite::new)),
+            // > currentIteration: The current iteration index beginning with zero for the first
+            // > iteration. In most cases this will be a (positive) integer. However, for a zero
+            // > duration animation that repeats infinite times, the value will be positive
+            // > Infinity. As with unresolved times, an unresolved current iteration is
+            // > represented by a null value.
+            currentIteration: Some(calculated_timing.current_iteration),
         }
     }
 
@@ -347,6 +579,22 @@ impl AnimationEffectMethods<crate::DomTypeHolder> for AnimationEffect {
         self.update_the_associated_animation(cx);
         Ok(())
     }
+}
+
+/// <https://drafts.csswg.org/web-animations-1/#animation-effect-phases-and-states>
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Phase {
+    Before,
+    Active,
+    After,
+}
+
+/// The values of <https://drafts.csswg.org/web-animations-1/#calculating-progress> at one
+/// moment.
+struct CalculatedTiming {
+    local_time: Option<f64>,
+    transformed_progress: Option<f64>,
+    current_iteration: Option<f64>,
 }
 
 #[derive(Clone, Copy, Debug, JSTraceable, MallocSizeOf)]
