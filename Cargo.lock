@@ -8650,6 +8650,7 @@ dependencies = [
  "euclid",
  "http",
  "image",
+ "indexmap 2.14.2",
  "inventory",
  "keyboard-types",
  "log",
