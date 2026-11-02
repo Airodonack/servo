@@ -1304,6 +1304,7 @@ impl ScriptThread {
             document.is_fully_active() &&
                 !document.window().throttled() &&
                 (document.animation_manager().running_animation_count() != 0 ||
+                    document.animation_manager().web_animations_need_frames() ||
                     document.has_active_request_animation_frame_callbacks())
         });
 

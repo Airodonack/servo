@@ -5379,14 +5379,19 @@ impl Document {
         let current_timeline_value = self.current_animation_timeline_value();
         self.animation_manager
             .update_for_new_timeline_value(&self.window, current_timeline_value);
+        self.animation_manager
+            .update_web_animations(cx, &self.window);
         self.maybe_mark_animating_nodes_as_dirty(cx.no_gc());
 
         // > 3. Perform a microtask checkpoint.
         self.window().perform_a_microtask_checkpoint(cx);
 
-        // Steps 4 through 7 occur inside `send_pending_events().`
+        // Steps 4 through 7 occur inside `send_pending_events()` and
+        // `send_pending_playback_events()`.
         self.animation_manager()
             .send_pending_events(self.window(), cx);
+        self.animation_manager().send_pending_playback_events(cx);
+        self.animation_manager().prune_web_animations(self.window());
     }
 
     pub(crate) fn set_has_pending_animated_image_update(&self) {

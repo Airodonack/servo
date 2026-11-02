@@ -33,6 +33,7 @@ use style::selector_parser::PseudoElement;
 use timers::TimerId;
 
 use crate::dom::NodeFlags;
+use crate::dom::animation::{Animation as WebAnimation, PlaybackEventType};
 use crate::dom::animationevent::AnimationEvent;
 use crate::dom::bindings::codegen::Bindings::AnimationEventBinding::AnimationEventInit;
 use crate::dom::bindings::codegen::Bindings::EventBinding::EventInit;
@@ -83,6 +84,30 @@ pub(crate) struct AnimationManager {
     /// The [`TimerId`] of the currently scheduled animated image update callback.
     #[no_trace]
     image_callback_timer_id: Cell<Option<TimerId>>,
+
+    /// The Web Animations API animations whose document for timing is this document and
+    /// which this document updates on each animation frame: those that can change without
+    /// any call from script.
+    web_animations: DomRefCell<Vec<Dom<WebAnimation>>>,
+
+    /// The Web Animations part of the document's pending animation event queue
+    /// (<https://drafts.csswg.org/web-animations-1/#pending-animation-event-queue>).
+    pending_playback_events: DomRefCell<Vec<PendingPlaybackEvent>>,
+
+    /// Whether any Web Animations API animation needs animation frames.
+    web_animations_need_frames: Cell<bool>,
+}
+
+/// An [`AnimationPlaybackEvent`](crate::dom::animationplaybackevent::AnimationPlaybackEvent)
+/// waiting in the pending animation event queue, with its target and scheduled event time.
+#[derive(JSTraceable, MallocSizeOf)]
+#[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
+struct PendingPlaybackEvent {
+    animation: Dom<WebAnimation>,
+    event_type: PlaybackEventType,
+    current_time: Option<f64>,
+    timeline_time: Option<f64>,
+    scheduled_event_time: Option<f64>,
 }
 
 impl AnimationManager {
@@ -96,6 +121,9 @@ impl AnimationManager {
             pending_events: Default::default(),
             timeline_value_at_last_dirty: Cell::new(0.0),
             image_callback_timer_id: Default::default(),
+            web_animations: Default::default(),
+            pending_playback_events: Default::default(),
+            web_animations_need_frames: Cell::new(false),
         }
     }
 
@@ -113,6 +141,10 @@ impl AnimationManager {
         self.rooted_animation_nodes.borrow_mut().clear();
         self.rooted_image_nodes.borrow_mut().clear();
         self.pending_events.borrow_mut().clear();
+        for animation in self.web_animations.borrow_mut().drain(..) {
+            animation.set_tracked_by_document(false);
+        }
+        self.pending_playback_events.borrow_mut().clear();
     }
 
     // Mark all animations dirty, if they haven't been marked dirty since the
@@ -336,7 +368,8 @@ impl AnimationManager {
     }
 
     fn handle_animation_presence_or_pending_events_change(&self, window: &Window) {
-        let has_running_animations = self.has_running_animations.get();
+        let has_running_animations =
+            self.has_running_animations.get() || self.web_animations_need_frames.get();
         let has_pending_events = !self.pending_events.borrow().is_empty();
 
         // Do not send the AnimationCallbacksAbsent state until all pending
@@ -348,6 +381,145 @@ impl AnimationManager {
         window.send_to_constellation(ScriptToConstellationMessage::ChangeRunningAnimationsState(
             state,
         ));
+    }
+
+    /// Keep `animation` in the list of Web Animations API animations updated on each animation
+    /// frame, until [`Self::prune_web_animations`] finds it no longer needs it.
+    pub(crate) fn track_web_animation(&self, animation: &WebAnimation) {
+        self.web_animations
+            .borrow_mut()
+            .push(Dom::from_ref(animation));
+    }
+
+    /// Whether any Web Animations API animation needs animation frames. Their effects are not
+    /// rendered, so the renderer does not tick them: the script thread schedules the frames.
+    pub(crate) fn web_animations_need_frames(&self) -> bool {
+        self.web_animations_need_frames.get()
+    }
+
+    /// Make sure animation frames are produced for this document's Web Animations API
+    /// animations, after a call from script changed one or queued one of its events.
+    pub(crate) fn request_web_animation_frames(&self, window: &Window) {
+        if !self.web_animations_need_frames.get() {
+            self.web_animations_need_frames.set(true);
+            self.handle_animation_presence_or_pending_events_change(window);
+        }
+    }
+
+    /// Append an animation playback event to the pending animation event queue.
+    pub(crate) fn queue_playback_event(
+        &self,
+        window: &Window,
+        animation: &WebAnimation,
+        event_type: PlaybackEventType,
+        current_time: Option<f64>,
+        timeline_time: Option<f64>,
+        scheduled_event_time: Option<f64>,
+    ) {
+        self.pending_playback_events
+            .borrow_mut()
+            .push(PendingPlaybackEvent {
+                animation: Dom::from_ref(animation),
+                event_type,
+                current_time,
+                timeline_time,
+                // Times computed along different paths (a start time plus the effect end, or
+                // the timeline's time) can differ in their last bits; to the microsecond, as
+                // Chrome keeps times, events scheduled for the same moment compare equal and
+                // keep the order they were queued in.
+                scheduled_event_time: scheduled_event_time
+                    .map(|time| (time * 1000.0).round() / 1000.0),
+            });
+        self.request_web_animation_frames(window);
+    }
+
+    /// The Web Animations API part of step 1 of
+    /// <https://drafts.csswg.org/web-animations-1/#update-animations-and-send-events>:
+    /// > Update the current time of all timelines associated with doc passing now as the
+    /// > timestamp.
+    /// > Due to the hierarchical nature of the timing model, updating the current time of a
+    /// > timeline also involves: Updating the current time of any animations associated with
+    /// > the timeline. Running the update an animation’s finished state procedure for any
+    /// > animations whose current time has been updated. Queueing animation events for any
+    /// > such animations.
+    ///
+    /// This is also when animations become ready, so their pending play and pause tasks run
+    /// first, with the time of this animation frame as the ready time.
+    pub(crate) fn update_web_animations(&self, cx: &mut js::context::JSContext, window: &Window) {
+        let animations: Vec<DomRoot<WebAnimation>> = self
+            .web_animations
+            .borrow()
+            .iter()
+            .map(|animation| DomRoot::from_ref(&**animation))
+            .collect();
+        for animation in &animations {
+            animation.update_timeline(window);
+        }
+        for animation in &animations {
+            animation.run_pending_task_if_ready(cx);
+            animation.update_finished_state(cx, false, false);
+        }
+    }
+
+    /// Steps 4 to 7 of <https://drafts.csswg.org/web-animations-1/#update-animations-and-send-events>
+    /// for the Web Animations API's animation playback events.
+    ///
+    /// TODO: CSS animation and transition events are dispatched before these, rather than
+    /// sorted together with them.
+    pub(crate) fn send_pending_playback_events(&self, cx: &mut js::context::JSContext) {
+        // > 4. Let events to dispatch be a copy of doc’s pending animation event queue.
+        // > 5. Clear doc’s pending animation event queue.
+        let mut events: Vec<_> = std::mem::take(&mut *self.pending_playback_events.borrow_mut())
+            .into_iter()
+            .map(|event| {
+                (
+                    DomRoot::from_ref(&*event.animation),
+                    event.event_type,
+                    event.current_time,
+                    event.timeline_time,
+                    event.scheduled_event_time,
+                )
+            })
+            .collect();
+
+        // > 6. Perform a stable sort of the animation events in events to dispatch as follows:
+        // > 1. Sort the events by their scheduled event time such that events that were scheduled
+        // > to occur earlier sort before events scheduled to occur later, and events whose
+        // > scheduled event time is unresolved sort before events with a resolved scheduled
+        // > event time.
+        //
+        // `None` sorts before `Some`, and `sort_by` is stable.
+        //
+        // TODO: > 2. Within events with equal scheduled event times, sort by their composite order.
+        events.sort_by(|a, b| a.4.partial_cmp(&b.4).unwrap_or(std::cmp::Ordering::Equal));
+
+        // > 7. Dispatch each of the events in events to dispatch at their corresponding target
+        // > using the order established in the previous step.
+        for (animation, event_type, current_time, timeline_time, _) in events {
+            animation.dispatch_playback_event(cx, event_type, current_time, timeline_time);
+        }
+    }
+
+    /// Stop updating the Web Animations API animations that can no longer change without a
+    /// call from script, and stop asking for animation frames when none needs them.
+    pub(crate) fn prune_web_animations(&self, window: &Window) {
+        self.web_animations.borrow_mut().retain(|animation| {
+            let keep = animation.needs_tracking();
+            if !keep {
+                animation.set_tracked_by_document(false);
+            }
+            keep
+        });
+
+        let need_frames = !self.pending_playback_events.borrow().is_empty() ||
+            self.web_animations
+                .borrow()
+                .iter()
+                .any(|animation| animation.needs_animation_frames());
+        if need_frames != self.web_animations_need_frames.get() {
+            self.web_animations_need_frames.set(need_frames);
+            self.handle_animation_presence_or_pending_events_change(window);
+        }
     }
 
     pub(crate) fn running_animation_count(&self) -> usize {
