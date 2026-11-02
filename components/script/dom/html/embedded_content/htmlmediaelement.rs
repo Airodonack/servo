@@ -2747,6 +2747,22 @@ impl HTMLMediaElement {
             return;
         }
 
+        // The player has no media past this point, so playback is at the end of the media
+        // resource even when the last position it reported falls short of the duration (a
+        // file's last frame or audio packet can end before the duration its container gives).
+        // The current playback position becomes the end, so that the element has ended
+        // playback: it pauses, `ended` is true, and play() seeks back to the start. With a
+        // MediaSource the position is already held to its duration as it changes.
+        // <https://html.spec.whatwg.org/multipage/#reaches-the-end>
+        let duration = self.duration.get();
+        if self.media_source.get().is_none() &&
+            duration.is_finite() &&
+            self.direction_of_playback() == PlaybackDirection::Forwards &&
+            self.current_playback_position.get() < duration
+        {
+            self.playback_position_changed(cx, duration);
+        }
+
         match self.direction_of_playback() {
             PlaybackDirection::Forwards => self.end_of_playback_in_forwards_direction(cx),
             PlaybackDirection::Backwards => self.end_of_playback_in_backwards_direction(),
