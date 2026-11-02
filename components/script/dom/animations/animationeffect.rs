@@ -25,6 +25,7 @@ use style_traits::{ParsingMode, ToCss};
 use crate::css::css::parser_context_for_document;
 use crate::dom::Window;
 use crate::dom::animation::Animation;
+use crate::dom::bindings::codegen::Bindings::AnimationBinding::AnimationPlayState;
 use crate::dom::bindings::codegen::UnionTypes::UnrestrictedDoubleOrString;
 use crate::dom::bindings::root::MutNullableDom;
 
@@ -332,9 +333,42 @@ impl AnimationEffect {
 
         CalculatedTiming {
             local_time,
+            active_time,
             transformed_progress,
             current_iteration,
         }
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#in-effect>
+    pub(crate) fn is_in_effect(&self) -> bool {
+        // > An animation effect is in effect if its active time, as calculated according to the
+        // > procedure in § 4.7.2 Calculating the active time, is not unresolved.
+        self.calculated_timing().active_time.is_some()
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#current>
+    pub(crate) fn is_current(&self) -> bool {
+        let Some(animation) = self.associated_animation() else {
+            return false;
+        };
+        let phase = self.phase(self.local_time());
+        let rate = animation.playback_rate();
+
+        // > An animation effect is current if any of the following conditions are true: the
+        // > animation effect is in play, or the animation effect is in the before phase and is
+        // > associated with an animation with a playback rate > 0, or the animation effect is in
+        // > the after phase and is associated with an animation with a playback rate < 0, or the
+        // > animation effect is associated with an animation not in the idle play state with a
+        // > non-null associated timeline that is not monotonically increasing.
+        //
+        // > An animation effect is in play if all of the following conditions are met: the
+        // > animation effect is in the active phase, and the animation effect is associated with
+        // > an animation that is not finished.
+        //
+        // Document timelines are monotonically increasing.
+        (phase == Some(Phase::Active) && animation.play_state() != AnimationPlayState::Finished) ||
+            (phase == Some(Phase::Before) && rate > 0.0) ||
+            (phase == Some(Phase::After) && rate < 0.0)
     }
 
     /// <https://drafts.csswg.org/web-animations-1/#end-time>
@@ -593,6 +627,7 @@ pub(crate) enum Phase {
 /// moment.
 struct CalculatedTiming {
     local_time: Option<f64>,
+    active_time: Option<f64>,
     transformed_progress: Option<f64>,
     current_iteration: Option<f64>,
 }

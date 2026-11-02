@@ -43,6 +43,7 @@ use crate::dom::bindings::num::Finite;
 use crate::dom::bindings::root::{Dom, DomRoot};
 use crate::dom::bindings::str::DOMString;
 use crate::dom::bindings::trace::NoTrace;
+use crate::dom::element::Element;
 use crate::dom::event::Event;
 use crate::dom::node::{Node, NodeDamage, NodeTraits, from_untrusted_node_address};
 use crate::dom::transitionevent::TransitionEvent;
@@ -488,15 +489,103 @@ impl AnimationManager {
         // > scheduled event time is unresolved sort before events with a resolved scheduled
         // > event time.
         //
-        // `None` sorts before `Some`, and `sort_by` is stable.
+        // > 2. Within events with equal scheduled event times, sort by their composite order.
         //
-        // TODO: > 2. Within events with equal scheduled event times, sort by their composite order.
-        events.sort_by(|a, b| a.4.partial_cmp(&b.4).unwrap_or(std::cmp::Ordering::Equal));
+        // `None` sorts before `Some`, and `sort_by` is stable.
+        events.sort_by(|a, b| {
+            a.4.partial_cmp(&b.4)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.0.composite_order().cmp(&b.0.composite_order()))
+        });
 
         // > 7. Dispatch each of the events in events to dispatch at their corresponding target
         // > using the order established in the previous step.
         for (animation, event_type, current_time, timeline_time, _) in events {
             animation.dispatch_playback_event(cx, event_type, current_time, timeline_time);
+        }
+    }
+
+    /// The relevant Web Animations API animations whose effect target matches `filter`, sorted
+    /// by composite order: what getAnimations() returns.
+    pub(crate) fn relevant_web_animations(
+        &self,
+        filter: impl Fn(&Element) -> bool,
+    ) -> Vec<DomRoot<WebAnimation>> {
+        let mut animations: Vec<DomRoot<WebAnimation>> = self
+            .web_animations
+            .borrow()
+            .iter()
+            .filter(|animation| {
+                animation.is_relevant() &&
+                    animation
+                        .effect_target()
+                        .is_some_and(|target| filter(&target))
+            })
+            .map(|animation| DomRoot::from_ref(&**animation))
+            .collect();
+        animations.sort_by_key(|animation| animation.composite_order());
+        animations
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#remove-replaced-animations>
+    pub(crate) fn remove_replaced_web_animations(&self) {
+        // > When asked to remove replaced animations for a Document, doc, then for every
+        // > animation, animation, that: has an associated animation effect whose effect target
+        // > is a descendant of doc, and is replaceable, and has a replace state of active, and
+        // > for which there exists for each target property of every animation effect associated
+        // > with animation, an animation effect associated with a replaceable animation with a
+        // > higher composite order than animation that includes the same target property
+        // > perform the following steps:
+        let mut replaceable: Vec<(DomRoot<WebAnimation>, DomRoot<Element>)> = self
+            .web_animations
+            .borrow()
+            .iter()
+            .filter(|animation| animation.is_replaceable())
+            .filter_map(|animation| {
+                let target = animation.effect_target()?;
+                target
+                    .upcast::<Node>()
+                    .is_connected()
+                    .then(|| (DomRoot::from_ref(&**animation), target))
+            })
+            .collect();
+        if replaceable.is_empty() {
+            return;
+        }
+
+        // Walk from the top of the composite order down, gathering the properties that later
+        // animations of each target animate.
+        replaceable.sort_by_key(|(animation, _)| std::cmp::Reverse(animation.composite_order()));
+        let mut replaced_properties: Vec<(DomRoot<Element>, Vec<style::properties::LonghandId>)> =
+            Vec::new();
+        for (animation, target) in replaceable {
+            let properties = animation.effect_target_properties();
+            let index = match replaced_properties
+                .iter()
+                .position(|(element, _)| *element == target)
+            {
+                Some(index) => index,
+                None => {
+                    replaced_properties.push((target, Vec::new()));
+                    replaced_properties.len() - 1
+                },
+            };
+            let covered = &mut replaced_properties[index].1;
+            // An effect without target properties is never taken as replaced: Servo does not
+            // read property-indexed keyframes yet, so such an effect can still animate some.
+            let is_replaced = !properties.is_empty() &&
+                properties.iter().all(|property| covered.contains(property));
+            if is_replaced &&
+                animation.replace_state() ==
+                    crate::dom::bindings::codegen::Bindings::AnimationBinding::AnimationReplaceState::Active
+            {
+                animation.remove_as_replaced();
+            }
+            for property in properties {
+                if !covered.contains(&property) {
+                    covered.push(property);
+                }
+            }
         }
     }
 
