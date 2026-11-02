@@ -89,8 +89,13 @@ impl Console {
         messages: Vec<HandleValue>,
         include_stacktrace: IncludeStackTrace,
     ) {
+        // The devtools preview walks every property and prototype of each argument, which costs
+        // far more than the embedder's string for a large object graph: build it only when a
+        // devtools client listens.
         #[cfg(feature = "devtools")]
-        let devtools_arguments: Vec<DebuggerValue>;
+        let devtools_listens = global.devtools_chan().is_some();
+        #[cfg(feature = "devtools")]
+        let mut devtools_arguments: Vec<DebuggerValue> = Vec::new();
 
         // If the first argument is a string, apply sprintf-style substitutions per the
         // WHATWG Console spec formatter. The result is a single formatted string followed
@@ -100,17 +105,15 @@ impl Console {
             let remaining = &messages[consumed..];
 
             #[cfg(feature = "devtools")]
-            {
-                let mut arguments: Vec<DebuggerValue> =
-                    vec![DebuggerValue::StringValue(formatted.clone())];
+            if devtools_listens {
+                devtools_arguments.push(DebuggerValue::StringValue(formatted.clone()));
                 for msg in remaining {
-                    arguments.push(devtools::console_argument_from_handle_value(
+                    devtools_arguments.push(devtools::console_argument_from_handle_value(
                         cx,
                         *msg,
                         &mut Vec::new(),
                     ));
                 }
-                devtools_arguments = arguments;
             }
 
             let embedder_msg = if remaining.is_empty() {
@@ -122,21 +125,20 @@ impl Console {
             embedder_msg.into()
         } else {
             #[cfg(feature = "devtools")]
-            {
-                let arguments: Vec<DebuggerValue> = messages
+            if devtools_listens {
+                devtools_arguments = messages
                     .iter()
                     .map(|msg| {
                         devtools::console_argument_from_handle_value(cx, *msg, &mut Vec::new())
                     })
                     .collect();
-                devtools_arguments = arguments;
             }
 
             stringify_handle_values(cx, &messages)
         };
 
         #[cfg(feature = "devtools")]
-        {
+        if devtools_listens {
             let stacktrace =
                 (include_stacktrace == IncludeStackTrace::Yes).then_some(get_js_stack(cx));
             Console::send_to_devtools(
@@ -1242,7 +1244,7 @@ impl consoleMethods<crate::DomTypeHolder> for Console {
         _options: Option<*mut jsapi::JSObject>,
     ) {
         #[cfg(feature = "devtools")]
-        {
+        if global.devtools_chan().is_some() {
             // Step 1. Let object be item with generic JavaScript object formatting applied.
             let argument = devtools::console_argument_from_handle_value(cx, item, &mut Vec::new());
             let prefix = global.current_group_label().unwrap_or_default();
@@ -1256,17 +1258,15 @@ impl consoleMethods<crate::DomTypeHolder> for Console {
                 ConsoleLogLevel::Dir,
                 format!("{prefix}{}", stringify_debugger_value(&argument)),
             );
+            return;
         }
 
-        #[cfg(not(feature = "devtools"))]
-        {
-            let prefix = global.current_group_label().unwrap_or_default();
-            Self::send_to_embedder(
-                global,
-                ConsoleLogLevel::Dir,
-                format!("{prefix}{}", stringify_handle_value(cx, item)),
-            );
-        }
+        let prefix = global.current_group_label().unwrap_or_default();
+        Self::send_to_embedder(
+            global,
+            ConsoleLogLevel::Dir,
+            format!("{prefix}{}", stringify_handle_value(cx, item)),
+        );
     }
 
     /// <https://developer.mozilla.org/en-US/docs/Web/API/Console/assert>
