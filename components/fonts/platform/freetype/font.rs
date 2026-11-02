@@ -195,7 +195,7 @@ impl PlatformFontMethods for PlatformFont {
     fn glyph_h_advance(&self, glyph: GlyphId) -> Option<FractionalPixel> {
         let face = self.face.lock();
 
-        let load_flags = face.glyph_load_flags();
+        let load_flags = face.glyph_advance_load_flags();
         let result = unsafe { FT_Load_Glyph(face.as_ptr(), glyph as FT_UInt, load_flags) };
         if 0 != result {
             debug!("Unable to load glyph {}. reason: {:?}", glyph, result);
@@ -386,7 +386,11 @@ impl PlatformFontMethods for PlatformFont {
         // On other platforms, we only pass this when we know that we are loading a font with
         // color characters, but not passing this flag simply *prevents* WebRender from
         // loading bitmaps. There's no harm to always passing it.
-        let mut flags = FontInstanceFlags::EMBEDDED_BITMAPS;
+        //
+        // Glyph advances are fractional (see `FreeTypeFace::glyph_advance_load_flags`), so ask
+        // WebRender to draw each glyph at its fractional position rather than snapping it to
+        // a whole pixel, which would space the glyphs unevenly.
+        let mut flags = FontInstanceFlags::EMBEDDED_BITMAPS | FontInstanceFlags::SUBPIXEL_POSITION;
 
         // TODO: Add support for synthetic italics.
         // <https://github.com/servo/servo/issues/39637>
