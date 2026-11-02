@@ -686,10 +686,11 @@ impl GStreamerPlayer {
         let mut config = player.config();
         config.set_position_update_interval(500u32);
         // Seek to the exact time asked for. Without this, demuxers that can only seek
-        // to a sync point (MPEG-TS with 2 s keyframe spacing lands up to 2 s early) report
-        // a position away from the one the media element requested, and the element, which only
-        // completes a seek whose reported position is within SEEK_POSITION_THRESHOLD
-        // of the request, is left with `seeking` set forever.
+        // to a sync point (tsdemux on a progressive MPEG-TS file lands up to a keyframe
+        // interval early) report a position seconds away from the one the media element
+        // requested, and the element, which only completes a seek whose reported position
+        // is within SEEK_POSITION_THRESHOLD of the request, is left with `seeking` set
+        // forever.
         config.set_seek_accurate(true);
         player
             .set_config(config)

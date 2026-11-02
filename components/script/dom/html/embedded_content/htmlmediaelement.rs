@@ -20,6 +20,7 @@ use http::header::HeaderMap;
 use js::context::{JSContext, NoGC};
 use js::realm::CurrentRealm;
 use layout_api::MediaFrame;
+use mime::Mime;
 use net_traits::fetch::fetch_controller::FetchController;
 use net_traits::request::{Destination, RequestId};
 use net_traits::{CoreResourceThread, FetchMetadata, Metadata, NetworkError, ResourceFetchTiming};
@@ -132,6 +133,112 @@ const SEEK_POSITION_THRESHOLD: f64 = 0.5;
 /// exactly (the test media's audio and video together start 0.07 s into each segment);
 /// Chrome allows about two frame durations here.
 const MEDIA_SOURCE_RANGE_START_TOLERANCE: f64 = 0.1;
+
+/// Media types of adaptive streaming manifests: HLS playlists, DASH MPDs and Smooth
+/// Streaming manifests. The element does not play these as a media resource. A manifest
+/// names the segments and keys to download, and a backend that played one would fetch
+/// them with its own HTTP client, outside Servo's fetch (no CSP, mixed content or CORS
+/// checks, and no tainting). Pages play adaptive streams through Media Source Extensions
+/// instead, fetching each part themselves, as in desktop browsers without native HLS.
+const ADAPTIVE_STREAMING_MANIFEST_TYPES: &[&str] = &[
+    "application/vnd.apple.mpegurl",
+    "application/x-mpegurl",
+    "audio/mpegurl",
+    "audio/x-mpegurl",
+    "application/dash+xml",
+    "application/vnd.ms-sstr+xml",
+];
+
+/// How many bytes at the start of a response may be held back while deciding whether
+/// they are an adaptive streaming manifest (an XML declaration and comments can come
+/// before an MPD's root element).
+const MANIFEST_SNIFF_LIMIT: usize = 4096;
+
+/// Whether a MIME type (parameters allowed) is that of an adaptive streaming manifest.
+fn is_adaptive_streaming_manifest_type(mime_type: &str) -> bool {
+    let essence = mime_type.split(';').next().unwrap_or_default().trim();
+    ADAPTIVE_STREAMING_MANIFEST_TYPES
+        .iter()
+        .any(|manifest_type| manifest_type.eq_ignore_ascii_case(essence))
+}
+
+/// Whether the element can play media of a type: the backend's answer, except for
+/// adaptive streaming manifests, which the element never plays.
+/// <https://html.spec.whatwg.org/multipage/#dom-navigator-canplaytype>
+fn can_play_type(mime_type: &str) -> SupportsMediaType {
+    if is_adaptive_streaming_manifest_type(mime_type) {
+        return SupportsMediaType::No;
+    }
+    ServoMedia::get().can_play_type(mime_type)
+}
+
+/// How far the first bytes of a response say it is an adaptive streaming manifest.
+#[derive(Debug, PartialEq)]
+enum ManifestSniff {
+    Manifest,
+    NotManifest,
+    /// The bytes so far are a prefix of a manifest's start; more are needed to tell.
+    NeedMore,
+}
+
+/// Looks at the first bytes of a response for an HLS playlist (`#EXTM3U` first) or an
+/// XML document whose root element is `MPD` (DASH) or `SmoothStreamingMedia`, the way a
+/// demuxer's type finder would recognise one whatever the response's Content-Type.
+fn sniff_adaptive_streaming_manifest(bytes: &[u8]) -> ManifestSniff {
+    const BOM: &[u8] = b"\xEF\xBB\xBF";
+    if bytes.len() < BOM.len() && BOM.starts_with(bytes) {
+        return ManifestSniff::NeedMore;
+    }
+    let mut rest = bytes.strip_prefix(BOM).unwrap_or(bytes);
+    loop {
+        rest = rest.trim_ascii_start();
+        let Some(&first) = rest.first() else {
+            return ManifestSniff::NeedMore;
+        };
+        if first == b'#' {
+            const HLS_TAG: &[u8] = b"#EXTM3U";
+            return if rest.starts_with(HLS_TAG) {
+                ManifestSniff::Manifest
+            } else if HLS_TAG.starts_with(rest) {
+                ManifestSniff::NeedMore
+            } else {
+                ManifestSniff::NotManifest
+            };
+        }
+        if first != b'<' {
+            return ManifestSniff::NotManifest;
+        }
+        // Skip what XML allows before the root element: the XML declaration, processing
+        // instructions, comments and a doctype.
+        let end_marker: &[u8] = if rest.starts_with(b"<!--") {
+            b"-->"
+        } else if rest.starts_with(b"<?") || rest.starts_with(b"<!") {
+            b">"
+        } else {
+            let name = &rest[1..];
+            let Some(name_end) = name
+                .iter()
+                .position(|&byte| byte.is_ascii_whitespace() || byte == b'>' || byte == b'/')
+            else {
+                return ManifestSniff::NeedMore;
+            };
+            let name = &name[..name_end];
+            let local_name = name.rsplit(|&byte| byte == b':').next().unwrap_or(name);
+            return if local_name == b"MPD" || local_name == b"SmoothStreamingMedia" {
+                ManifestSniff::Manifest
+            } else {
+                ManifestSniff::NotManifest
+            };
+        };
+        let Some(end) = rest
+            .windows(end_marker.len())
+            .position(|window| window == end_marker)
+        else {
+            return ManifestSniff::NeedMore;
+        };
+        rest = &rest[end + end_marker.len()..];
+    }
+}
 
 /// With a MediaSource attached, a first buffered range that starts before this time is the start
 /// of the media: a current playback position anywhere before it counts as in it, and playback
@@ -1483,7 +1590,7 @@ impl HTMLMediaElement {
         // parameter), represents a type that the user agent knows it cannot render, then end the
         // synchronous section, and jump down to the failed with elements step below.
         if let Some(type_) = element.get_attribute_string_value(&local_name!("type")) &&
-            ServoMedia::get().can_play_type(&type_) == SupportsMediaType::No
+            can_play_type(&type_) == SupportsMediaType::No
         {
             self.load_from_source_child_failure_steps(cx, source);
             return;
@@ -4121,7 +4228,7 @@ impl HTMLMediaElementMethods<crate::DomTypeHolder> for HTMLMediaElement {
 
     /// <https://html.spec.whatwg.org/multipage/#dom-navigator-canplaytype>
     fn CanPlayType(&self, type_: DOMString) -> CanPlayTypeResult {
-        match ServoMedia::get().can_play_type(&type_.str()) {
+        match can_play_type(&type_.str()) {
             SupportsMediaType::No => CanPlayTypeResult::_empty,
             SupportsMediaType::Maybe => CanPlayTypeResult::Maybe,
             SupportsMediaType::Probably => CanPlayTypeResult::Probably,
@@ -4773,6 +4880,10 @@ struct HTMLMediaElementFetchListener {
     /// request if range requests are not supported. Seek requests set it
     /// to the required position (in bytes).
     content_length_to_discard: u64,
+    /// The first bytes of the response, held back from the player while they may still be
+    /// the start of an adaptive streaming manifest. None once that is decided, and for a
+    /// fetch that starts after the beginning of the resource.
+    manifest_sniff: Option<Vec<u8>>,
 }
 
 impl FetchResponseListener for HTMLMediaElementFetchListener {
@@ -4813,6 +4924,21 @@ impl FetchResponseListener for HTMLMediaElementFetchListener {
                 element.media_data_processing_fatal_steps(cx, MEDIA_ERR_NETWORK);
             }
             return;
+        }
+
+        // <https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list>
+        // => "If the media data can be fetched but is found by inspection to be in an
+        // unsupported format, or can otherwise not be rendered at all": an adaptive streaming
+        // manifest is not a media resource the element plays.
+        if let Some(content_type) = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.content_type.as_ref())
+        {
+            let mime: Mime = content_type.clone().into_inner().into();
+            if is_adaptive_streaming_manifest_type(mime.essence_str()) {
+                element.media_data_processing_failure_steps(cx);
+                return;
+            }
         }
 
         if let Some(ref mut current_fetch_context) = *element.current_fetch_context.borrow_mut() {
@@ -4870,7 +4996,7 @@ impl FetchResponseListener for HTMLMediaElementFetchListener {
 
     fn process_response_chunk(
         &mut self,
-        _: &mut JSContext,
+        cx: &mut JSContext,
         _: &GlobalScope,
         _: RequestId,
         chunk: Bytes,
@@ -4878,6 +5004,28 @@ impl FetchResponseListener for HTMLMediaElementFetchListener {
         let element = self.element.root();
 
         self.fetched_content_length += chunk.len() as u64;
+
+        // <https://html.spec.whatwg.org/multipage/#media-data-processing-steps-list>
+        // => "If the media data can be fetched but is found by inspection to be in an
+        // unsupported format, or can otherwise not be rendered at all": a response whose
+        // first bytes are an adaptive streaming manifest, whatever its Content-Type.
+        let chunk = match self.manifest_sniff.take() {
+            None => chunk,
+            Some(mut prefix) => {
+                prefix.extend_from_slice(&chunk);
+                match sniff_adaptive_streaming_manifest(&prefix) {
+                    ManifestSniff::Manifest => {
+                        element.media_data_processing_failure_steps(cx);
+                        return;
+                    },
+                    ManifestSniff::NeedMore if prefix.len() < MANIFEST_SNIFF_LIMIT => {
+                        self.manifest_sniff = Some(prefix);
+                        return;
+                    },
+                    ManifestSniff::NeedMore | ManifestSniff::NotManifest => Bytes::from(prefix),
+                }
+            },
+        };
 
         // If an error was received previously, we skip processing the payload.
         if let Some(ref mut current_fetch_context) = *element.current_fetch_context.borrow_mut() {
@@ -4929,7 +5077,7 @@ impl FetchResponseListener for HTMLMediaElementFetchListener {
     }
 
     fn process_response_eof(
-        self,
+        mut self,
         cx: &mut JSContext,
         global: &GlobalScope,
         _: RequestId,
@@ -4967,6 +5115,14 @@ impl FetchResponseListener for HTMLMediaElementFetchListener {
 
                 let mut data_source = current_fetch_context.data_source().borrow_mut();
 
+                // A resource shorter than a manifest's start was held back whole.
+                if let Some(prefix) = self
+                    .manifest_sniff
+                    .take()
+                    .filter(|prefix| !prefix.is_empty())
+                {
+                    data_source.add_buffer_to_queue(DataBuffer::Payload(prefix));
+                }
                 data_source.add_buffer_to_queue(DataBuffer::EndOfStream);
                 let _ = data_source
                     .process_into_player_from_queue(element.player.borrow().as_ref().unwrap());
@@ -5053,6 +5209,7 @@ impl HTMLMediaElementFetchListener {
             expected_content_length: None,
             fetched_content_length: 0,
             content_length_to_discard: offset,
+            manifest_sniff: (offset == 0).then(Vec::new),
         }
     }
 }
