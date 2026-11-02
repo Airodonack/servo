@@ -562,16 +562,17 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
         // Step 4. If type contains a MIME type that is not supported, then
         // throw a NotSupportedError exception: the same test as addSourceBuffer,
         // registry and backend, before step 5 reopens an ended media source.
-        if !crate::dom::mediasource::is_media_source_type_supported(&type_.str()) {
+        let Some(content_type) = crate::dom::mediasource::supported_media_source_type(&type_.str())
+        else {
             return Err(Error::NotSupported(Some(
                 "The content type is not supported".into(),
             )));
-        }
+        };
         // Step 5. If the parent media source is "ended", reopen it.
         self.check_state(true)?;
         // Steps 6-9. The backend switches its parser to the new type, or
         // refuses with NotSupportedError when it cannot change types at all.
-        self.with_handle(|handle| handle.change_type(&type_.str()))?
+        self.with_handle(|handle| handle.change_type(&content_type))?
             .map_err(media_source_error)
     }
 
