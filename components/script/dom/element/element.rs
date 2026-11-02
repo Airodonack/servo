@@ -4800,7 +4800,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         cx: &mut JSContext,
         keyframes: *mut JSObject,
         options: UnrestrictedDoubleOrKeyframeAnimationOptions,
-    ) -> DomRoot<Animation> {
+    ) -> Fallible<DomRoot<Animation>> {
         let window = self.owner_window();
 
         // Step 1. Let target be the object on which this method was called.
@@ -4837,8 +4837,14 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
                 UnrestrictedDoubleOrKeyframeEffectOptions::KeyframeEffectOptions(options.parent)
             },
         };
-        let effect =
-            KeyframeEffect::Constructor(cx, &window, None, Some(target), keyframes, parent_options);
+        let effect = KeyframeEffect::Constructor(
+            cx,
+            &window,
+            None,
+            Some(target),
+            keyframes,
+            parent_options,
+        )?;
 
         // Step 4. Construct a new Animation object, animation, in the relevant Realm of target by using
         // the same procedure as the Animation() constructor, passing effect and timeline as arguments of
@@ -4857,7 +4863,7 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
         // TODO: Step 6. Run the procedure to play an animation for animation with the auto-rewind flag set to true.
 
         // Step 7. Return animation.
-        animation
+        Ok(animation)
     }
 }
 
