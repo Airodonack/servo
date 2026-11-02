@@ -320,7 +320,10 @@ fn round_halves_positive(n: f64) -> f64 {
 /// The position of a [`PointerEvent`] in the same coordinate space as the boxes returned by
 /// layout queries.
 fn client_point(event: &PointerEvent) -> Point2D<Au, CSSPixel> {
-    event.upcast::<MouseEvent>().client_point().map(Au::from_px)
+    event
+        .upcast::<MouseEvent>()
+        .client_point()
+        .map(Au::from_f64_px)
 }
 
 /// The `min` and `max` of a range input, which always both have a default.
