@@ -201,6 +201,11 @@ impl Animation {
             .map_or(0.0, |effect| effect.end_time())
     }
 
+    /// <https://drafts.csswg.org/web-animations-1/#playback-rate>
+    pub(crate) fn playback_rate(&self) -> f64 {
+        self.playback_rate.get()
+    }
+
     /// <https://drafts.csswg.org/web-animations-1/#effective-playback-rate>
     fn effective_playback_rate(&self) -> f64 {
         self.pending_playback_rate
