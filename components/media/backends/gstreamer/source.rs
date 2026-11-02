@@ -231,6 +231,17 @@ mod imp {
                     q.add_scheduling_modes([gstreamer::PadMode::Push]);
                     true
                 },
+                // Answer with this element's URI, as GstBaseSrc does for a source that is a
+                // URI handler (the appsrc inside does not answer). An element that starts a
+                // stream with no stream-start from upstream, such as typefind, id3demux and
+                // mpegaudioparse pulling through playbin's download buffer, derives its
+                // stream-id from this URI. Without an answer each picks a different random
+                // id, so the stream decodebin3 is handed is not the one in the stream
+                // collection parsebin posted, and decodebin3 aborts on an assertion.
+                gstreamer::QueryViewMut::Uri(ref mut q) => {
+                    q.set_uri(Some("servosrc://"));
+                    true
+                },
                 _ => gstreamer::Pad::query_default(pad, Some(&*self.obj()), query),
             };
 
