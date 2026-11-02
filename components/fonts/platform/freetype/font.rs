@@ -280,6 +280,14 @@ impl PlatformFontMethods for PlatformFont {
         // Convert using a formula similar to what CTFont returns for consistency.
         let leading = line_height - (max_ascent + max_descent);
 
+        // Round the ascent, descent and line gap to whole pixels, as Blink does. With fractional
+        // values each line box and baseline lands a fraction of a pixel away from where other
+        // browsers put it, and the error adds up down a page.
+        let max_ascent = max_ascent.round();
+        let max_descent = max_descent.round();
+        let leading = leading.round();
+        let line_height = max_ascent + max_descent + leading;
+
         let underline_size = face.as_ref().underline_thickness as f64 * y_scale;
         let underline_offset = face.as_ref().underline_position as f64 * y_scale + 0.5;
 
