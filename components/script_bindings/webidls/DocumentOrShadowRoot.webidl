@@ -27,3 +27,8 @@ partial interface mixin DocumentOrShadowRoot {
 partial interface mixin DocumentOrShadowRoot {
   [LegacyLenientSetter] readonly attribute Element? fullscreenElement;
 };
+
+// https://drafts.csswg.org/web-animations-1/#extensions-to-the-documentorshadowroot-interface-mixin
+partial interface mixin DocumentOrShadowRoot {
+  [Pref="dom_web_animations_enabled"] sequence<Animation> getAnimations();
+};

@@ -24,6 +24,7 @@ use stylo_atoms::Atom;
 
 use crate::conversions::Convert;
 use crate::css::stylesheet_set::StylesheetSetRef;
+use crate::dom::animation::Animation;
 use crate::dom::bindings::codegen::Bindings::ElementBinding::GetHTMLOptions;
 use crate::dom::bindings::codegen::Bindings::HTMLSlotElementBinding::HTMLSlotElement_Binding::HTMLSlotElementMethods;
 use crate::dom::bindings::codegen::Bindings::SanitizerBinding::{
@@ -628,6 +629,16 @@ impl ShadowRootMethods<crate::DomTypeHolder> for ShadowRoot {
         }
 
         result
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#dom-documentorshadowroot-getanimations>
+    fn GetAnimations(&self) -> Vec<DomRoot<Animation>> {
+        // > Returns the set of relevant animations for a subtree for the document or shadow root
+        // > on which this method is called.
+        let node = self.upcast::<Node>();
+        self.document
+            .animation_manager()
+            .relevant_web_animations(|target| node.is_ancestor_of(target.upcast()))
     }
 
     /// <https://fullscreen.spec.whatwg.org/#dom-document-fullscreenelement>
