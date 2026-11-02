@@ -922,8 +922,9 @@ impl FloatBox {
 /// Layout state that we maintain when doing sequential traversals of the box tree in document
 /// order.
 ///
-/// This data is only needed for float placement and float interaction, and as such is only present
-/// if the current block formatting context contains floats.
+/// This data is only needed for float placement and float interaction, and for line clamping, and
+/// as such is only present if the current block formatting context contains floats or is that of a
+/// line-clamp container.
 ///
 /// All coordinates here are relative to the start of the nearest ancestor block formatting context.
 ///
@@ -942,6 +943,51 @@ pub(crate) struct SequentialLayoutState {
     pub(crate) bfc_relative_block_position: Au,
     /// Any collapsible margins that we've encountered after `bfc_relative_block_position`.
     pub(crate) current_margin: CollapsedMargin,
+    /// The clamp state, when this block formatting context is that of a line-clamp container.
+    pub(crate) line_clamp: Option<LineClampState>,
+}
+
+/// The clamp state of a line-clamp container, which the content of its block formatting
+/// context updates in tree order: <https://drafts.csswg.org/css-overflow-4/#line-clamp-container>
+///
+/// > The max-lines property sets the clamp point of a line-clamp container [...] Given an
+/// > integer N, if the box is a line-clamp container, it has an line-based clamp point,
+/// > set to the first possible clamp point after its Nth descendant in-flow line box.
+#[derive(Clone)]
+pub(crate) struct LineClampState {
+    /// How many more in-flow line boxes come before the clamp point. Once this is zero,
+    /// all remaining content is after the clamp point.
+    pub(crate) remaining_lines: usize,
+    /// The block overflow ellipsis placed at the end of the last line before the clamp
+    /// point, if any: <https://drafts.csswg.org/css-overflow-4/#block-ellipsis>
+    pub(crate) ellipsis: Option<String>,
+    /// Whether in-flow content of the line-clamp container follows the box being laid out,
+    /// so that there is a possible clamp point after its last line box.
+    pub(crate) content_follows: bool,
+    /// The block-end edge of the lowest float placed before the clamp point. Floats after
+    /// it are suppressed and do not extend the line-clamp container.
+    pub(crate) float_block_end_at_clamp_point: Au,
+}
+
+impl LineClampState {
+    pub(crate) fn new(lines: usize, ellipsis: Option<String>) -> Self {
+        LineClampState {
+            remaining_lines: lines,
+            ellipsis,
+            content_follows: false,
+            float_block_end_at_clamp_point: Au::zero(),
+        }
+    }
+
+    /// Whether the clamp point has been reached, so that what is laid out now is
+    /// visually suppressed:
+    /// <https://drafts.csswg.org/css-overflow-4/#valdef-continue-collapse>
+    ///
+    /// > This causes all content after the clamp point to be visually suppressed, and to
+    /// > not be taken into account for the box's automatic block size.
+    pub(crate) fn is_after_clamp_point(&self) -> bool {
+        self.remaining_lines == 0
+    }
 }
 
 impl SequentialLayoutState {
@@ -951,6 +997,35 @@ impl SequentialLayoutState {
             floats: FloatContext::new(max_inline_size),
             current_margin: CollapsedMargin::zero(),
             bfc_relative_block_position: Au::zero(),
+            line_clamp: None,
+        }
+    }
+
+    /// Whether this is the block formatting context of a line-clamp container whose clamp
+    /// point has been reached.
+    pub(crate) fn is_after_clamp_point(&self) -> bool {
+        self.line_clamp
+            .as_ref()
+            .is_some_and(LineClampState::is_after_clamp_point)
+    }
+
+    /// Called after laying out an in-flow line box of this block formatting context. When
+    /// it is the last one before the clamp point, remember how far the floats placed so
+    /// far reach, since they are the only ones that the line-clamp container contains.
+    pub(crate) fn count_line_for_line_clamp(&mut self) {
+        let float_block_end = self
+            .floats
+            .clear_inline_start_position
+            .max(self.floats.clear_inline_end_position);
+        let Some(line_clamp) = self.line_clamp.as_mut() else {
+            return;
+        };
+        if line_clamp.remaining_lines == 0 {
+            return;
+        }
+        line_clamp.remaining_lines -= 1;
+        if line_clamp.remaining_lines == 0 {
+            line_clamp.float_block_end_at_clamp_point = float_block_end;
         }
     }
 

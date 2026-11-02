@@ -18,13 +18,18 @@ use style::context::{QuirksMode, SharedStyleContext};
 use style::logical_geometry::LogicalAxis;
 use style::properties::ComputedValues;
 use style::servo::selector_parser::PseudoElement;
+use style::values::computed::BoxOrient;
+use style::values::generics::box_::BlockEllipsis;
 use style::values::specified::align::AlignFlags;
+use style::values::specified::box_::DisplayInside as StyloDisplayInside;
 use style::values::specified::{Display, TextAlignKeyword};
 
 use crate::cell::ArcRefCell;
 use crate::context::LayoutContext;
 use crate::dom::WeakLayoutBox;
-use crate::flow::float::{Clear, FloatBox, FloatSide, PlacementAmongFloats, SequentialLayoutState};
+use crate::flow::float::{
+    Clear, FloatBox, FloatSide, LineClampState, PlacementAmongFloats, SequentialLayoutState,
+};
 use crate::flow::same_formatting_context_block::SameFormattingContextBlock;
 use crate::formatting_contexts::{Baselines, IndependentFormattingContext};
 use crate::fragment_tree::{
@@ -477,12 +482,19 @@ impl BlockFormattingContext {
         lazy_block_size: &LazySize,
         base: Option<&LayoutBoxBase>,
     ) -> IndependentFormattingContextLayoutResult {
-        let mut sequential_layout_state =
-            if self.contains_floats || !layout_context.allow_parallel_layout {
-                Some(SequentialLayoutState::new(containing_block.size.inline))
-            } else {
-                None
-            };
+        // Line clamping counts line boxes in tree order, so it needs sequential layout too.
+        let line_clamp = line_clamp_state(containing_block.style);
+        let mut sequential_layout_state = if self.contains_floats ||
+            line_clamp.is_some() ||
+            !layout_context.allow_parallel_layout
+        {
+            let mut sequential_layout_state =
+                SequentialLayoutState::new(containing_block.size.inline);
+            sequential_layout_state.line_clamp = line_clamp;
+            Some(sequential_layout_state)
+        } else {
+            None
+        };
 
         // Since this is an independent formatting context, we don't ignore block margins when
         // resolving a stretch block size of the children.
@@ -509,14 +521,24 @@ impl BlockFormattingContext {
 
         // The content height of a BFC root should include any float participating in that BFC
         // (https://drafts.csswg.org/css2/#root-height), we implement this by imagining there is
-        // an element with `clear: both` after the actual contents.
-        let clearance = sequential_layout_state.and_then(|sequential_layout_state| {
-            sequential_layout_state.calculate_clearance(Clear::Both, &CollapsedMargin::zero())
-        });
-
-        let content_block_size = flow_layout.content_block_size +
-            flow_layout.collapsible_margins_in_children.end.solve() +
-            clearance.unwrap_or_default();
+        // an element with `clear: both` after the actual contents. A line-clamp container whose
+        // clamp point was reached includes only the floats placed before it.
+        let flow_block_size = flow_layout.content_block_size +
+            flow_layout.collapsible_margins_in_children.end.solve();
+        let content_block_size = match sequential_layout_state {
+            Some(sequential_layout_state) => match &sequential_layout_state.line_clamp {
+                Some(line_clamp) if line_clamp.is_after_clamp_point() => {
+                    flow_block_size.max(line_clamp.float_block_end_at_clamp_point)
+                },
+                _ => {
+                    flow_block_size +
+                        sequential_layout_state
+                            .calculate_clearance(Clear::Both, &CollapsedMargin::zero())
+                            .unwrap_or_default()
+                },
+            },
+            None => flow_block_size,
+        };
 
         // Buttons center their contents in the block axis. Therefore, create an `AnonymousFragment`
         // that contains the fragments of the contents, and place it as desired.
@@ -953,23 +975,100 @@ fn layout_block_level_children_sequentially(
     placement_state: &mut PlacementState,
     ignore_block_margins_for_stretch: LogicalSides1D<bool>,
 ) -> Vec<Fragment> {
-    // Because floats are involved, we do layout for this block formatting context in tree
-    // order without parallelism. This enables mutable access to a `SequentialLayoutState` that
-    // tracks every float encountered so far (again in tree order).
-    child_boxes
-        .iter()
-        .map(|child_box| {
-            layout_block_level_child(
-                layout_context,
-                positioning_context,
-                &child_box.borrow(),
-                Some(sequential_layout_state),
-                placement_state,
-                ignore_block_margins_for_stretch,
-                false, /* has_inline_parent */
+    // Because floats or line clamping are involved, we do layout for this block formatting
+    // context in tree order without parallelism. This enables mutable access to a
+    // `SequentialLayoutState` that tracks every float encountered so far (again in tree order)
+    // and how many lines may still be laid out before the clamp point.
+    let content_follows_parent = sequential_layout_state
+        .line_clamp
+        .as_ref()
+        .is_some_and(|line_clamp| line_clamp.content_follows);
+    let mut fragments = Vec::with_capacity(child_boxes.len());
+    for (index, child_box) in child_boxes.iter().enumerate() {
+        let child_box = child_box.borrow();
+        // Absolutely positioned boxes take no room, and other engines keep them after the
+        // clamp point, so they are laid out as usual.
+        if sequential_layout_state.is_after_clamp_point() &&
+            !matches!(
+                *child_box,
+                BlockLevelBox::OutOfFlowAbsolutelyPositionedBox(_)
             )
-        })
-        .collect()
+        {
+            layout_block_level_child_after_clamp_point(
+                layout_context,
+                &child_box,
+                placement_state.containing_block,
+            );
+            continue;
+        }
+        if let Some(line_clamp) = sequential_layout_state.line_clamp.as_mut() {
+            line_clamp.content_follows = content_follows_parent ||
+                child_boxes[index + 1..]
+                    .iter()
+                    .any(|sibling| sibling.borrow().is_in_flow());
+        }
+        fragments.push(layout_block_level_child(
+            layout_context,
+            positioning_context,
+            &child_box,
+            Some(sequential_layout_state),
+            placement_state,
+            ignore_block_margins_for_stretch,
+            false, /* has_inline_parent */
+        ));
+    }
+    if let Some(line_clamp) = sequential_layout_state.line_clamp.as_mut() {
+        line_clamp.content_follows = content_follows_parent;
+    }
+    fragments
+}
+
+/// The clamp state of the block formatting context established by a box with the given style,
+/// if that box is a line-clamp container. That is only the legacy `-webkit-line-clamp` on a
+/// vertical `-webkit-box` for now, since the `line-clamp` shorthand is behind a preference:
+/// <https://drafts.csswg.org/css-overflow-4/#webkit-line-clamp>
+///
+/// > The -webkit-legacy value behaves identically to collapse, except that it only takes
+/// > effect if the specified value of the display property is -webkit-box or
+/// > -webkit-inline-box and the value of the -webkit-box-orient property is vertical.
+fn line_clamp_state(style: &ComputedValues) -> Option<LineClampState> {
+    let box_style = style.get_box();
+    let line_clamp = &box_style.line_clamp;
+    if !line_clamp.webkit_legacy ||
+        box_style.original_display.inside() != StyloDisplayInside::WebkitBox ||
+        style.get_xul()._moz_box_orient != BoxOrient::Vertical
+    {
+        return None;
+    }
+    let lines = line_clamp.max_lines.lines_value()?.0;
+    let ellipsis = match &line_clamp.block_ellipsis {
+        BlockEllipsis::Ellipsis => Some("\u{2026}".to_owned()),
+        BlockEllipsis::NoEllipsis => None,
+        BlockEllipsis::String(string) => Some(string.to_string()),
+    };
+    Some(LineClampState::new(lines.max(1) as usize, ellipsis))
+}
+
+/// Lay out a block-level box that comes after the clamp point of a line-clamp container. Its
+/// content is visually suppressed: its fragments are not placed, it does not take room in the
+/// line-clamp container, and floats in it do not affect what comes before the clamp point.
+/// It is still laid out, so that its boxes do not keep fragments from an earlier layout.
+fn layout_block_level_child_after_clamp_point(
+    layout_context: &LayoutContext,
+    child_box: &BlockLevelBox,
+    containing_block: &ContainingBlock,
+) {
+    let mut positioning_context = PositioningContext::default();
+    let mut sequential_layout_state = SequentialLayoutState::new(containing_block.size.inline);
+    child_box.layout(
+        layout_context,
+        &mut positioning_context,
+        containing_block,
+        Some(&mut sequential_layout_state),
+        Some(CollapsibleWithParentStartMargin(false)),
+        LogicalSides1D::new(false, false),
+        false, /* has_inline_parent */
+    );
 }
 
 fn layout_block_level_child(
@@ -1004,6 +1103,18 @@ fn layout_block_level_child(
 }
 
 impl BlockLevelBox {
+    /// Whether this box is in flow, so that there is a possible clamp point before it:
+    /// <https://drafts.csswg.org/css-overflow-4/#line-clamp-container>
+    ///
+    /// > A point between two in-flow block-level sibling boxes in the line-clamp container's
+    /// > block formatting context.
+    fn is_in_flow(&self) -> bool {
+        matches!(
+            self,
+            BlockLevelBox::Independent(_) | BlockLevelBox::SameFormattingContextBlock(_)
+        )
+    }
+
     #[expect(clippy::too_many_arguments)]
     fn layout(
         &self,
