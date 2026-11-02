@@ -623,7 +623,7 @@ impl HTMLDialogElement {
         // Step 2. If target is a dialog element, target has an open attribute, target's is modal is
         // true, and event's clientX and clientY are outside the bounds of target, then return null.
         let point = pointer_event.upcast::<MouseEvent>().client_point();
-        let point = Point2D::new(Au::from_px(point.x), Au::from_px(point.y));
+        let point = Point2D::new(Au::from_f64_px(point.x), Au::from_f64_px(point.y));
         if target.is::<HTMLDialogElement>() &&
             let Some(element) = target.downcast::<Element>() &&
             element.has_attribute(&local_name!("open")) &&

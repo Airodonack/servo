@@ -3,19 +3,21 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
 // https://w3c.github.io/pointerevents/#dom-mouseevent
+// The coordinates are doubles as in the extension in CSSOM View:
+// https://drafts.csswg.org/cssom-view/#extensions-to-the-mouseevent-interface
 [Exposed=Window]
 interface MouseEvent : UIEvent {
     [Throws] constructor(DOMString typeArg, optional MouseEventInit mouseEventInitDict = {});
-    readonly    attribute long           screenX;
-    readonly    attribute long           screenY;
-    readonly    attribute long           clientX;
-    readonly    attribute long           clientY;
-    readonly    attribute long           pageX;
-    readonly    attribute long           pageY;
-    readonly    attribute long           x;
-    readonly    attribute long           y;
-    readonly    attribute long           offsetX;
-    readonly    attribute long           offsetY;
+    readonly    attribute double         screenX;
+    readonly    attribute double         screenY;
+    readonly    attribute double         clientX;
+    readonly    attribute double         clientY;
+    readonly    attribute double         pageX;
+    readonly    attribute double         pageY;
+    readonly    attribute double         x;
+    readonly    attribute double         y;
+    readonly    attribute double         offsetX;
+    readonly    attribute double         offsetY;
     readonly    attribute boolean        ctrlKey;
     readonly    attribute boolean        shiftKey;
     readonly    attribute boolean        altKey;
@@ -28,11 +30,12 @@ interface MouseEvent : UIEvent {
 };
 
 // https://w3c.github.io/pointerevents/#dom-mouseeventinit
+// https://drafts.csswg.org/cssom-view/#dictdef-mouseeventinit
 dictionary MouseEventInit : EventModifierInit {
-    long           screenX = 0;
-    long           screenY = 0;
-    long           clientX = 0;
-    long           clientY = 0;
+    double         screenX = 0.0;
+    double         screenY = 0.0;
+    double         clientX = 0.0;
+    double         clientY = 0.0;
     short          button = 0;
     unsigned short buttons = 0;
     EventTarget?   relatedTarget = null;
