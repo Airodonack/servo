@@ -1603,9 +1603,13 @@ impl InlineFormattingContextLayout<'_> {
             match text_align {
                 TextAlign::Start => text_indent,
                 TextAlign::End => (available_space - line_length).max(text_indent),
-                TextAlign::Center => (available_space - line_length + text_indent)
-                    .scale_by(0.5)
-                    .max(text_indent),
+                // Halve by truncating, as flex alignment does (and Gecko does for both), so
+                // that a line centered here lands on the same app unit as the same content
+                // centered by `align-items: center`. With fractional glyph advances the free
+                // space is often an odd number of app units.
+                TextAlign::Center => {
+                    ((available_space - line_length + text_indent) / 2).max(text_indent)
+                },
             };
 
         // Calculate the justification adjustment. This is simply the remaining space on the line,
