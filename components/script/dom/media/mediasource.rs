@@ -7,10 +7,10 @@ use std::ffi::CString;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, Weak};
 
+use data_url::mime::Mime;
 use dom_struct::dom_struct;
 use js::context::JSContext;
 use js::rust::HandleObject;
-use mime::Mime;
 use script_bindings::cell::DomRefCell;
 use script_bindings::reflector::reflect_weak_referenceable_dom_object_with_proto;
 use servo_base::generic_channel::GenericCallback;
@@ -102,44 +102,52 @@ pub(crate) fn media_source_error(error: MediaSourceError) -> Error {
     }
 }
 
-/// Whether a SourceBuffer of this content type can be created: the type must
-/// have the shape [`is_valid_media_source_type`] checks, and the media backend
-/// must support its byte stream format and decode its codecs.
+/// The type a SourceBuffer of this content type is created with, if one can
+/// be: the type must have the shape [`media_source_type`] checks, and the
+/// media backend must support its byte stream format and decode its codecs.
 /// `addSourceBuffer`, `changeType` and `isTypeSupported` share this test;
 /// their "not supported" steps are worded the same.
 ///
 /// <https://w3c.github.io/media-source/#dom-mediasource-istypesupported>
-pub(crate) fn is_media_source_type_supported(type_: &str) -> bool {
-    is_valid_media_source_type(type_) && ServoMedia::get().is_media_source_type_supported(type_)
+pub(crate) fn supported_media_source_type(type_: &str) -> Option<String> {
+    media_source_type(type_)
+        .filter(|media_type| ServoMedia::get().is_media_source_type_supported(media_type))
 }
 
-/// Whether `type_` has the shape of a SourceBuffer's type, before the media
-/// backend is asked which byte stream formats and codecs it supports: a MIME
-/// type, and for the ISO BMFF and WebM formats (video/mp4, audio/mp4,
-/// video/webm, audio/webm) a codecs parameter that names at least one codec.
-/// Which formats are registered, which codecs each may carry and the shape of
-/// a codec string are the backend's answer, which follows the registry.
+/// `type_` as the media backend is given it, when it has the shape of a
+/// SourceBuffer's type, before the backend is asked which byte stream formats
+/// and codecs it supports: a MIME type, and for the ISO BMFF and WebM formats
+/// (video/mp4, audio/mp4, video/webm, audio/webm) a codecs parameter that names
+/// at least one codec. Which formats are registered, which codecs each may carry
+/// and the shape of a codec string are the backend's answer, which follows the
+/// registry.
+///
+/// The type is parsed as the MIME Sniffing standard parses a MIME type, where an
+/// unquoted parameter value runs to the next ";": `codecs=avc1.42E01E,mp4a.40.2`
+/// names two codecs, as Chrome and Firefox read it. The backend gets the
+/// standard's serialization, which quotes such a value, so that its own stricter
+/// grammar sees the same parameters.
 ///
 /// An ISO BMFF or WebM type without codecs is refused, as Chrome refuses it
 /// in isTypeSupported(): it does not say what the bytes carry, which
 /// web-platform-tests' media-source isTypeSupported() cases expect.
 ///
+/// <https://mimesniff.spec.whatwg.org/#parsing-a-mime-type>
+/// <https://mimesniff.spec.whatwg.org/#serializing-a-mime-type>
 /// <https://w3c.github.io/mse-byte-stream-format-registry/>
-pub(crate) fn is_valid_media_source_type(type_: &str) -> bool {
-    let Ok(mime) = type_.trim().parse::<Mime>() else {
-        return false;
-    };
-    let names_codecs = mime.get_param("codecs").is_some_and(|codecs| {
-        codecs
-            .as_str()
-            .split(',')
-            .any(|codec| !codec.trim().is_empty())
-    });
-    let essence = format!("{}/{}", mime.type_(), mime.subtype()).to_ascii_lowercase();
-    match essence.as_str() {
-        "video/mp4" | "audio/mp4" | "video/webm" | "audio/webm" => names_codecs,
-        _ => true,
+fn media_source_type(type_: &str) -> Option<String> {
+    let mime = type_.parse::<Mime>().ok()?;
+    let names_codecs = mime
+        .get_parameter("codecs")
+        .is_some_and(|codecs| codecs.split(',').any(|codec| !codec.trim().is_empty()));
+    let iso_bmff_or_webm = matches!(
+        (mime.type_.as_str(), mime.subtype.as_str()),
+        ("video" | "audio", "mp4" | "webm")
+    );
+    if iso_bmff_or_webm && !names_codecs {
+        return None;
     }
+    Some(mime.to_string())
 }
 
 /// <https://w3c.github.io/media-source/#mediasource>
@@ -732,11 +740,11 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         // contains a MIME type that is not supported with the types specified
         // for the other SourceBuffer objects in sourceBuffers, then throw a
         // NotSupportedError exception.
-        if !is_media_source_type_supported(&type_.str()) {
+        let Some(content_type) = supported_media_source_type(&type_.str()) else {
             return Err(Error::NotSupported(Some(
                 "The content type is not supported".into(),
             )));
-        }
+        };
         // Step 3. If the user agent can't handle any more SourceBuffer objects,
         // then throw a QuotaExceededError exception.
         if self.source_buffers.buffers().len() >= MAX_SOURCE_BUFFERS {
@@ -754,7 +762,7 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         }
         // Steps 5-7. Let buffer be a new SourceBuffer with its associated
         // resources; the backend sets its mode from the byte stream format.
-        let buffer = SourceBuffer::new(cx, &self.global(), self, &type_.str())?;
+        let buffer = SourceBuffer::new(cx, &self.global(), self, &content_type)?;
         // Steps 8-9. Append buffer to sourceBuffers and queue a task to fire an
         // event named addsourcebuffer at sourceBuffers. It joins
         // activeSourceBuffers once its first initialization segment is
@@ -883,6 +891,6 @@ impl MediaSourceMethods<crate::DomTypeHolder> for MediaSource {
         }
         // Steps 2-6. The type must be a registered byte stream format with
         // codecs the format allows, and the media backend must decode them.
-        is_media_source_type_supported(&type_.str())
+        supported_media_source_type(&type_.str()).is_some()
     }
 }
