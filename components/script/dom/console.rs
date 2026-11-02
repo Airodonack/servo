@@ -89,8 +89,17 @@ impl Console {
         messages: Vec<HandleValue>,
         include_stacktrace: IncludeStackTrace,
     ) {
+        // The devtools preview walks every property and prototype of each argument, which costs
+        // far more than the embedder's string: build it only when the devtools server runs.
+        // The server keeps console messages for a client that connects later, so whether a
+        // client is connected does not matter.
         #[cfg(feature = "devtools")]
-        let devtools_arguments: Vec<DebuggerValue>;
+        let devtools_listens = global.devtools_chan().is_some();
+        #[cfg(feature = "devtools")]
+        let mut devtools_arguments: Vec<DebuggerValue> = Vec::new();
+        // One walk for all the arguments, so that its limits bound the whole call.
+        #[cfg(feature = "devtools")]
+        let mut preview_walk = devtools::PreviewWalk::default();
 
         // If the first argument is a string, apply sprintf-style substitutions per the
         // WHATWG Console spec formatter. The result is a single formatted string followed
@@ -100,17 +109,15 @@ impl Console {
             let remaining = &messages[consumed..];
 
             #[cfg(feature = "devtools")]
-            {
-                let mut arguments: Vec<DebuggerValue> =
-                    vec![DebuggerValue::StringValue(formatted.clone())];
+            if devtools_listens {
+                devtools_arguments.push(DebuggerValue::StringValue(formatted.clone()));
                 for msg in remaining {
-                    arguments.push(devtools::console_argument_from_handle_value(
+                    devtools_arguments.push(devtools::console_argument_from_handle_value(
                         cx,
                         *msg,
-                        &mut Vec::new(),
+                        &mut preview_walk,
                     ));
                 }
-                devtools_arguments = arguments;
             }
 
             let embedder_msg = if remaining.is_empty() {
@@ -122,21 +129,20 @@ impl Console {
             embedder_msg.into()
         } else {
             #[cfg(feature = "devtools")]
-            {
-                let arguments: Vec<DebuggerValue> = messages
+            if devtools_listens {
+                devtools_arguments = messages
                     .iter()
                     .map(|msg| {
-                        devtools::console_argument_from_handle_value(cx, *msg, &mut Vec::new())
+                        devtools::console_argument_from_handle_value(cx, *msg, &mut preview_walk)
                     })
                     .collect();
-                devtools_arguments = arguments;
             }
 
             stringify_handle_values(cx, &messages)
         };
 
         #[cfg(feature = "devtools")]
-        {
+        if devtools_listens {
             let stacktrace =
                 (include_stacktrace == IncludeStackTrace::Yes).then_some(get_js_stack(cx));
             Console::send_to_devtools(
@@ -179,6 +185,8 @@ fn handle_value_to_string(cx: &mut JSContext, value: HandleValue) -> DOMString {
 
 #[cfg(feature = "devtools")]
 mod devtools {
+    use std::collections::HashSet;
+
     use super::*;
 
     impl Console {
@@ -218,17 +226,55 @@ mod devtools {
         }
     }
 
+    /// The most values one devtools preview holds.
+    const MAX_PREVIEW_VALUES: usize = 10_000;
+    /// The deepest a devtools preview goes, counting prototypes as a level.
+    const MAX_PREVIEW_DEPTH: usize = 20;
+
+    /// What one argument's devtools preview has walked so far.
+    ///
+    /// The preview follows every own property and the prototype of each object, and the
+    /// devtools server answers later expansions of the logged object from it. An object
+    /// reachable by many paths is walked once per path, and a long chain recurses once per
+    /// link, so without limits one call can exhaust memory or the stack. Past the limits a
+    /// value is shown as "…", as the embedder's string does.
+    #[derive(Default)]
+    pub(super) struct PreviewWalk {
+        /// The objects from the argument down to the current value, to stop at cycles.
+        path: Vec<u64>,
+        /// Prototypes already previewed. Most objects share a few large ones, such as
+        /// `Object.prototype`, so only their first occurrence is previewed.
+        prototypes: HashSet<u64>,
+        /// The values previewed so far.
+        values: usize,
+    }
+
+    impl PreviewWalk {
+        fn is_full(&self) -> bool {
+            self.values >= MAX_PREVIEW_VALUES
+        }
+    }
+
+    fn elided() -> DebuggerValue {
+        DebuggerValue::StringValue("…".into())
+    }
+
     pub(super) fn console_argument_from_handle_value(
         cx: &mut JSContext,
         handle_value: HandleValue,
-        seen: &mut Vec<u64>,
+        walk: &mut PreviewWalk,
     ) -> DebuggerValue {
         #[expect(unsafe_code)]
         fn inner(
             cx: &mut JSContext,
             handle_value: HandleValue,
-            seen: &mut Vec<u64>,
+            walk: &mut PreviewWalk,
         ) -> Result<DebuggerValue, ()> {
+            if walk.is_full() {
+                return Ok(elided());
+            }
+            walk.values += 1;
+
             if handle_value.is_string() {
                 let js_string = ptr::NonNull::new(handle_value.to_string()).unwrap();
                 let dom_string = unsafe { jsstr_to_string(cx, js_string) };
@@ -247,17 +293,23 @@ mod devtools {
 
             if handle_value.is_object() {
                 // JS objects can create circular reference, and we want to avoid recursing infinitely
-                if seen.contains(&handle_value.asBits_) {
+                if walk.path.contains(&handle_value.asBits_) {
                     // FIXME: Handle this properly
                     return Ok(DebuggerValue::StringValue("[circular]".into()));
                 }
+                if walk.path.len() >= MAX_PREVIEW_DEPTH {
+                    return Ok(elided());
+                }
 
-                seen.push(handle_value.asBits_);
+                walk.path.push(handle_value.asBits_);
                 rooted!(&in(cx) let object = handle_value.to_object());
-                let console_object = console_object_from_handle_value(cx, handle_value, seen);
-                let prototype = object_prototype_debugger_value(cx, object.handle(), seen)?;
-                let js_value = seen.pop();
+                // The prototype goes first, so that the argument's own prototype chain is
+                // previewed in full before any of its prototypes is met elsewhere.
+                let prototype = object_prototype_debugger_value(cx, object.handle(), walk);
+                let console_object = console_object_from_handle_value(cx, handle_value, walk);
+                let js_value = walk.path.pop();
                 debug_assert_eq!(js_value, Some(handle_value.asBits_));
+                let prototype = prototype?;
 
                 if let Some((class, preview)) = console_object {
                     return Ok(DebuggerValue::ObjectValue {
@@ -278,7 +330,7 @@ mod devtools {
             Ok(DebuggerValue::StringValue(stringified_value.into()))
         }
 
-        match inner(cx, handle_value, seen) {
+        match inner(cx, handle_value, walk) {
             Ok(arg) => arg,
             Err(()) => {
                 report_pending_exception(&mut CurrentRealm::assert(cx));
@@ -291,7 +343,7 @@ mod devtools {
     fn object_prototype_debugger_value(
         cx: &mut JSContext,
         object: HandleObject,
-        seen: &mut Vec<u64>,
+        walk: &mut PreviewWalk,
     ) -> Result<Option<Box<DebuggerValue>>, ()> {
         rooted!(&in(cx) let mut prototype = ptr::null_mut::<jsapi::JSObject>());
         if !JS_GetPrototype(cx, object, prototype.handle_mut()) {
@@ -302,10 +354,13 @@ mod devtools {
         }
 
         rooted!(&in(cx) let prototype = ObjectValue(prototype.get()));
+        if !walk.prototypes.insert(prototype.asBits_) {
+            return Ok(Some(Box::new(elided())));
+        }
         Ok(Some(Box::new(console_argument_from_handle_value(
             cx,
             prototype.handle(),
-            seen,
+            walk,
         ))))
     }
 
@@ -328,7 +383,7 @@ mod devtools {
     fn console_map_object_from_handle_value(
         cx: &mut JSContext,
         handle_object: HandleObject,
-        seen: &mut Vec<u64>,
+        walk: &mut PreviewWalk,
     ) -> Option<(String, ObjectPreview)> {
         rooted!(&in(cx) let mut iterator = UndefinedValue());
         if !unsafe { MapEntries(cx, handle_object, iterator.handle_mut()) } {
@@ -337,6 +392,9 @@ mod devtools {
 
         let mut entries = Vec::new();
         for_of(cx, iterator.handle(), |cx, entry| {
+            if walk.is_full() {
+                return Ok(std::ops::ControlFlow::Break(()));
+            }
             if !entry.is_object() {
                 return Err(().into());
             }
@@ -353,8 +411,8 @@ mod devtools {
             }
 
             entries.push((
-                console_argument_from_handle_value(cx, key.handle(), seen),
-                console_argument_from_handle_value(cx, value.handle(), seen),
+                console_argument_from_handle_value(cx, key.handle(), walk),
+                console_argument_from_handle_value(cx, value.handle(), walk),
             ));
 
             Ok(std::ops::ControlFlow::Continue(()))
@@ -380,7 +438,7 @@ mod devtools {
     fn console_object_from_handle_value(
         cx: &mut JSContext,
         handle_value: HandleValue,
-        seen: &mut Vec<u64>,
+        walk: &mut PreviewWalk,
     ) -> Option<(String, ObjectPreview)> {
         rooted!(&in(cx) let object = handle_value.to_object());
         let mut object_class = ESClass::Other;
@@ -396,7 +454,7 @@ mod devtools {
         }
 
         if object_class == ESClass::Map {
-            return console_map_object_from_handle_value(cx, object.handle(), seen);
+            return console_map_object_from_handle_value(cx, object.handle(), walk);
         }
 
         let mut own_properties = Vec::new();
@@ -414,6 +472,9 @@ mod devtools {
         }
 
         for id in ids.iter() {
+            if walk.is_full() {
+                break;
+            }
             rooted!(&in(cx) let id = *id);
             rooted!(&in(cx) let mut descriptor = PropertyDescriptor::default());
 
@@ -439,7 +500,7 @@ mod devtools {
                 accessor_value_from_property_descriptor(&descriptor)
             } else {
                 rooted!(&in(cx) let property = descriptor.value_);
-                console_argument_from_handle_value(cx, property.handle(), seen)
+                console_argument_from_handle_value(cx, property.handle(), walk)
             };
 
             if object_class == ESClass::Array && id.is_int() {
@@ -1135,8 +1196,11 @@ impl consoleMethods<crate::DomTypeHolder> for Console {
 
         #[cfg(feature = "devtools")]
         {
-            let data =
-                devtools::console_argument_from_handle_value(cx, tabular_data, &mut Vec::new());
+            let data = devtools::console_argument_from_handle_value(
+                cx,
+                tabular_data,
+                &mut devtools::PreviewWalk::default(),
+            );
 
             // Types we can't preview (e.g. Set today) come back as a string like "<error>".
             // Firefox's frontend also falls back to a plain log for unsupported data.
@@ -1241,10 +1305,16 @@ impl consoleMethods<crate::DomTypeHolder> for Console {
         item: HandleValue,
         _options: Option<*mut jsapi::JSObject>,
     ) {
+        // The embedder's string is made from the devtools preview, so the preview is built even
+        // when the devtools server is off: its walk is bounded, and the string stays the same.
         #[cfg(feature = "devtools")]
         {
             // Step 1. Let object be item with generic JavaScript object formatting applied.
-            let argument = devtools::console_argument_from_handle_value(cx, item, &mut Vec::new());
+            let argument = devtools::console_argument_from_handle_value(
+                cx,
+                item,
+                &mut devtools::PreviewWalk::default(),
+            );
             let prefix = global.current_group_label().unwrap_or_default();
             // Step 2. Perform Printer("dir", « object », options).
             Console::send_to_devtools(
