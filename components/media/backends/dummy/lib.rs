@@ -198,10 +198,6 @@ impl Player for DummyPlayer {
         Ok(())
     }
 
-    fn set_resource_url(&self, _: &str) -> Result<(), PlayerError> {
-        Ok(())
-    }
-
     fn attach_media_source(
         &self,
         _: GenericCallback<MediaSourceEvent>,

@@ -147,7 +147,6 @@ struct PlayerInner {
     video_sink: gstreamer_app::AppSink,
     input_size: u64,
     seekable: bool,
-    resource_url: Option<String>,
     play_state: gstreamer_play::PlayState,
     paused: Cell<bool>,
     can_resume: Cell<bool>,
@@ -179,14 +178,6 @@ impl PlayerInner {
         self.seekable = seekable;
         if let Some(PlayerSource::Seekable(ref mut source)) = self.source {
             source.set_seekable(seekable);
-        }
-        Ok(())
-    }
-
-    pub fn set_resource_url(&mut self, url: &str) -> Result<(), PlayerError> {
-        self.resource_url = Some(url.to_owned());
-        if let Some(PlayerSource::Seekable(ref mut source)) = self.source {
-            source.set_resource_uri(url);
         }
         Ok(())
     }
@@ -489,9 +480,6 @@ pub struct GStreamerPlayer {
     /// Whether to enable download buffering. This is only enabled heuristically for some media,
     /// because it causes issues in certain situations. See <https://github.com/servo/servo/issues/23241>.
     download_buffering_enabled: AtomicBool,
-    /// Set once an adaptive streaming demuxer joins the pipeline: it fetches playlists and
-    /// segments with its own HTTP client, outside Servo's fetch.
-    fetches_resource_parts: Arc<AtomicBool>,
 }
 
 impl GStreamerPlayer {
@@ -524,7 +512,6 @@ impl GStreamerPlayer {
             stream_type,
             render: Arc::new(Mutex::new(GStreamerRender::new(gl_context))),
             download_buffering_enabled: AtomicBool::new(false),
-            fetches_resource_parts: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -691,7 +678,6 @@ impl GStreamerPlayer {
             video_sink,
             input_size: 0,
             seekable: true,
-            resource_url: None,
             play_state: gstreamer_play::PlayState::Stopped,
             paused: Cell::new(DEFAULT_PAUSED),
             can_resume: Cell::new(DEFAULT_CAN_RESUME),
@@ -882,23 +868,6 @@ impl GStreamerPlayer {
             let sender_clone = sender.clone();
             let is_ready_clone = self.is_ready.clone();
             let observer = self.observer.clone();
-
-            // hlsdemux2, dashdemux2 and the legacy adaptive demuxers all have "Adaptive" in
-            // their element class.
-            let fetches_resource_parts = self.fetches_resource_parts.clone();
-            if let Some(pipeline) = pipeline.downcast_ref::<gstreamer::Bin>() {
-                pipeline.connect_deep_element_added(move |_, _, element| {
-                    let adaptive = element.factory().is_some_and(|factory| {
-                        factory
-                            .metadata(gstreamer::ELEMENT_METADATA_KLASS)
-                            .is_some_and(|klass| klass.contains("Adaptive"))
-                    });
-                    if adaptive {
-                        fetches_resource_parts.store(true, Ordering::Relaxed);
-                    }
-                });
-            }
-
             pipeline.connect("source-setup", false, move |args| {
                 let source = args[1].get::<gstreamer::Element>().unwrap();
 
@@ -913,9 +882,6 @@ impl GStreamerPlayer {
                             servosrc.set_size(inner.input_size as i64);
                         }
                         servosrc.set_seekable(inner.seekable);
-                        if let Some(ref url) = inner.resource_url {
-                            servosrc.set_resource_uri(url);
-                        }
 
                         let sender_clone = sender.clone();
                         let is_ready = is_ready_clone.clone();
@@ -1068,12 +1034,6 @@ impl Player for GStreamerPlayer {
     inner_player_proxy!(end_of_stream, ());
     inner_player_proxy!(set_input_size, size, u64);
     inner_player_proxy!(set_seekable, seekable, bool);
-    inner_player_proxy!(set_resource_url, url, &str);
-
-    fn fetches_resource_parts(&self) -> bool {
-        self.fetches_resource_parts.load(Ordering::Relaxed)
-    }
-
     fn attach_media_source(
         &self,
         callback: GenericCallback<MediaSourceEvent>,

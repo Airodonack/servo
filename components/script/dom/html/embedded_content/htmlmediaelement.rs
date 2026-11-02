@@ -3898,17 +3898,6 @@ impl HTMLMediaElement {
             return true;
         }
 
-        // Media the backend fetches parts of for itself (adaptive streaming) did not go through
-        // Servo's fetch, so nothing establishes that those parts are CORS-same-origin.
-        if self
-            .player
-            .borrow()
-            .as_ref()
-            .is_some_and(|player| player.lock().unwrap().fetches_resource_parts())
-        {
-            return false;
-        }
-
         // Step 5.remote (URL record).
         if self.resource_url.borrow().is_some() {
             // Update the media data with the contents
@@ -4948,19 +4937,6 @@ impl FetchResponseListener for HTMLMediaElementFetchListener {
             .set_seekable(is_seekable)
         {
             warn!("Could not set player seekable {:?}", e);
-        }
-
-        if let Some(metadata) = metadata.as_ref() &&
-            let Err(e) = element
-                .player
-                .borrow()
-                .as_ref()
-                .unwrap()
-                .lock()
-                .unwrap()
-                .set_resource_url(metadata.final_url.as_str())
-        {
-            warn!("Could not set player resource URL {:?}", e);
         }
 
         if let Some(expected_content_length) = self.expected_content_length &&

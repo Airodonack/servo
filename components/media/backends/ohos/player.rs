@@ -471,10 +471,6 @@ impl Player for OhosAvPlayer {
         Ok(())
     }
 
-    fn set_resource_url(&self, _: &str) -> Result<(), servo_media::player::PlayerError> {
-        Ok(())
-    }
-
     fn attach_media_source(
         &self,
         _: servo_base::generic_channel::GenericCallback<
