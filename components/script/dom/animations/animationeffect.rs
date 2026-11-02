@@ -4,6 +4,7 @@
 
 use cssparser::Parser;
 use dom_struct::dom_struct;
+use js::context::JSContext;
 use script_bindings::cell::DomRefCell;
 use script_bindings::codegen::GenericBindings::AnimationEffectBinding::{
     AnimationEffectMethods, ComputedEffectTiming, EffectTiming, FillMode, OptionalEffectTiming,
@@ -13,7 +14,7 @@ use script_bindings::codegen::GenericBindings::WindowBinding::WindowMethods;
 use script_bindings::error::{Error, Fallible};
 use script_bindings::num::Finite;
 use script_bindings::reflector::Reflector;
-use script_bindings::root::Dom;
+use script_bindings::root::{Dom, DomRoot};
 use script_bindings::str::DOMString;
 use style::parser::Parse;
 use style::stylesheets::CssRuleType;
@@ -23,7 +24,9 @@ use style_traits::{ParsingMode, ToCss};
 
 use crate::css::css::parser_context_for_document;
 use crate::dom::Window;
+use crate::dom::animation::Animation;
 use crate::dom::bindings::codegen::UnionTypes::UnrestrictedDoubleOrString;
+use crate::dom::bindings::root::MutNullableDom;
 
 /// <https://drafts.csswg.org/web-animations-1/#animationeffect>
 #[dom_struct]
@@ -34,6 +37,9 @@ pub(crate) struct AnimationEffect {
     window: Dom<Window>,
 
     specified_timing_properties: DomRefCell<SpecifiedTimingProperties>,
+
+    /// <https://drafts.csswg.org/web-animations-1/#animation-effect-associated-with-an-animation>
+    associated_animation: MutNullableDom<Animation>,
 }
 
 #[derive(Clone, JSTraceable, MallocSizeOf)]
@@ -83,7 +89,44 @@ impl AnimationEffect {
                 playback_direction: PlaybackDirection::Normal,
                 easing_function: TimingFunction::Keyword(TimingKeyword::Linear),
             }),
+            associated_animation: Default::default(),
         }
+    }
+
+    /// The animation whose associated effect this is, if any.
+    pub(crate) fn associated_animation(&self) -> Option<DomRoot<Animation>> {
+        self.associated_animation.get()
+    }
+
+    /// Only for [`Animation`], which keeps both sides of the association in step.
+    pub(crate) fn set_associated_animation(&self, animation: Option<&Animation>) {
+        self.associated_animation.set(animation);
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#active-duration>
+    pub(crate) fn active_duration(&self) -> f64 {
+        let timing = self.specified_timing_properties.borrow();
+        let iteration_duration = timing.iteration_duration.computed_value();
+
+        // > If either the iteration duration or iteration count are zero, the active duration is
+        // > zero.
+        if iteration_duration == 0.0 || timing.iteration_count == 0.0 {
+            return 0.0;
+        }
+
+        // > active duration = iteration duration × iteration count
+        iteration_duration * timing.iteration_count
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#end-time>
+    pub(crate) fn end_time(&self) -> f64 {
+        // > The end time, of an animation effect is the result of evaluating
+        // > max(start delay + active duration + end delay, 0).
+        let (start_delay, end_delay) = {
+            let timing = self.specified_timing_properties.borrow();
+            (*timing.start_delay, *timing.end_delay)
+        };
+        (start_delay + self.active_duration() + end_delay).max(0.0)
     }
 
     pub(crate) fn window(&self) -> &Window {
@@ -215,6 +258,19 @@ impl AnimationEffect {
         }
         Ok(())
     }
+
+    /// The last step of
+    /// <https://drafts.csswg.org/web-animations-1/#update-the-timing-properties-of-an-animation-effect>,
+    /// which needs a JS context: the earlier steps also run while constructing an effect, which
+    /// has no associated animation yet.
+    fn update_the_associated_animation(&self, cx: &mut JSContext) {
+        // > If effect is associated with an animation, run the procedure to update an animation’s
+        // > finished state for its associated animation with the did seek flag set to false, and
+        // > the synchronously notify flag set to false.
+        if let Some(animation) = self.associated_animation() {
+            animation.update_finished_state(cx, false, false);
+        }
+    }
 }
 
 impl AnimationEffectMethods<crate::DomTypeHolder> for AnimationEffect {
@@ -284,10 +340,12 @@ impl AnimationEffectMethods<crate::DomTypeHolder> for AnimationEffect {
     }
 
     /// <https://drafts.csswg.org/web-animations-1/#dom-animationeffect-updatetiming>
-    fn UpdateTiming(&self, timing: &OptionalEffectTiming) -> Fallible<()> {
+    fn UpdateTiming(&self, cx: &mut JSContext, timing: &OptionalEffectTiming) -> Fallible<()> {
         // > Updates the specified timing properties of this animation effect by performing the procedure
         // > to update the timing properties of an animation effect passing the timing parameter as input.
-        self.update_the_timing_properties(timing)
+        self.update_the_timing_properties(timing)?;
+        self.update_the_associated_animation(cx);
+        Ok(())
     }
 }
 
