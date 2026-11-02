@@ -95,6 +95,7 @@ use url::{Host, Position};
 
 use crate::css::stylesheet_loader::StylesheetContextId;
 use crate::css::stylesheet_set::StylesheetSetRef;
+use crate::dom::animation::Animation;
 use crate::dom::animationtimeline::AnimationTimeline;
 use crate::dom::attr::Attr;
 use crate::dom::beforeunloadevent::BeforeUnloadEvent;
@@ -5381,6 +5382,7 @@ impl Document {
             .update_for_new_timeline_value(&self.window, current_timeline_value);
         self.animation_manager
             .update_web_animations(cx, &self.window);
+        self.animation_manager.remove_replaced_web_animations();
         self.maybe_mark_animating_nodes_as_dirty(cx.no_gc());
 
         // > 3. Perform a microtask checkpoint.
@@ -7506,6 +7508,17 @@ impl DocumentMethods<crate::DomTypeHolder> for Document {
     /// <https://fullscreen.spec.whatwg.org/#dom-document-fullscreen>
     fn Fullscreen(&self) -> bool {
         self.fullscreen_element.get().is_some()
+    }
+
+    /// <https://drafts.csswg.org/web-animations-1/#dom-documentorshadowroot-getanimations>
+    fn GetAnimations(&self) -> Vec<DomRoot<Animation>> {
+        // > Returns the set of relevant animations for a subtree for the document or shadow root
+        // > on which this method is called. The returned list is sorted using the composite
+        // > order described for the associated animations of effects in § 5.4.2 The effect
+        // > stack.
+        let node = self.upcast::<Node>();
+        self.animation_manager()
+            .relevant_web_animations(|target| node.is_ancestor_of(target.upcast()))
     }
 
     /// <https://fullscreen.spec.whatwg.org/#dom-document-fullscreenelement>
