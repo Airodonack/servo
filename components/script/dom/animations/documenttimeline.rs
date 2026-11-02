@@ -75,6 +75,11 @@ impl DocumentTimeline {
             .set_current_time(duration_since_time_origin);
     }
 
+    /// <https://drafts.csswg.org/web-animations-1/#origin-time>, in milliseconds.
+    pub(crate) fn origin_time_in_milliseconds(&self) -> f64 {
+        self.origin_offset.as_seconds_f64() * 1000.0
+    }
+
     /// Increments the current value of the timeline by a specific number of seconds.
     /// This is used for testing.
     pub(crate) fn advance_specific(&self, by: Duration) {
