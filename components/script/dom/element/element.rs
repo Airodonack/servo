@@ -88,7 +88,8 @@ use crate::dom::bindings::cell::AtomicSafeBorrowMut;
 use crate::dom::bindings::codegen::Bindings::AttrBinding::AttrMethods;
 use crate::dom::bindings::codegen::Bindings::DocumentBinding::DocumentMethods;
 use crate::dom::bindings::codegen::Bindings::ElementBinding::{
-    ElementMethods, GetHTMLOptions, ScrollIntoViewContainer, ScrollLogicalPosition, ShadowRootInit,
+    CheckVisibilityOptions, ElementMethods, GetHTMLOptions, ScrollIntoViewContainer,
+    ScrollLogicalPosition, ShadowRootInit,
 };
 use crate::dom::bindings::codegen::Bindings::EventHandlerBinding::EventHandlerNonNull;
 use crate::dom::bindings::codegen::Bindings::FunctionBinding::Function;
@@ -3373,6 +3374,54 @@ impl ElementMethods<crate::DomTypeHolder> for Element {
     ) -> DomRoot<HTMLCollection> {
         let window = self.owner_window();
         HTMLCollection::by_class_name(cx, &window, self.upcast(), classes)
+    }
+
+    /// <https://drafts.csswg.org/cssom-view/#dom-element-checkvisibility>
+    fn CheckVisibility(&self, cx: &mut JSContext, options: &CheckVisibilityOptions) -> bool {
+        let node = self.upcast::<Node>();
+
+        // Step 1. If this does not have an associated box, return false.
+        // The box query brings layout, and with it the styles read below, up to date.
+        if node.border_boxes(cx).is_empty() {
+            return false;
+        }
+
+        // Step 2. If an ancestor of this in the flat tree has content-visibility: hidden,
+        // return false.
+        // Step 5. If contentVisibilityAuto is true and an ancestor of this in the flat tree
+        // skips its contents due to content-visibility: auto, return false.
+        // Servo does not support content-visibility: no element skips its contents.
+
+        // Step 3. If either the opacityProperty or the checkOpacity dictionary members of
+        // options are true, and this, or an ancestor of this in the flat tree, has a computed
+        // opacity value of 0, return false.
+        if options.opacityProperty || options.checkOpacity {
+            let transparent = node
+                .inclusive_ancestors(ShadowIncluding::Yes)
+                .filter_map(DomRoot::downcast::<Element>)
+                .any(|element| {
+                    element
+                        .style_without_reflow()
+                        .is_some_and(|style| style.get_effects().opacity == 0.0)
+                });
+            if transparent {
+                return false;
+            }
+        }
+
+        // Step 4. If either the visibilityProperty or the checkVisibilityCSS dictionary members
+        // of options are true, and this is invisible, return false.
+        if (options.visibilityProperty || options.checkVisibilityCSS) &&
+            self.style_without_reflow().is_some_and(|style| {
+                style.get_inherited_box().visibility !=
+                    style::computed_values::visibility::T::Visible
+            })
+        {
+            return false;
+        }
+
+        // Step 6. Return true.
+        true
     }
 
     /// <https://drafts.csswg.org/cssom-view/#dom-element-getclientrects>
