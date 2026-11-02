@@ -658,6 +658,9 @@ impl Service<Destination> for ProxyConnector {
 
 pub type ServoClient = Client<InstrumentedConnector<ProxyConnector>, BoxedBody>;
 
+/// The largest response header list accepted over HTTP/2, in RFC 9113 octets.
+const HTTP2_MAX_HEADER_LIST_SIZE: u32 = 256 * 1024;
+
 pub fn create_http_client(tls_config: TlsConfig) -> ServoClient {
     let connector = hyper_rustls::HttpsConnectorBuilder::new()
         .with_tls_config(tls_config)
@@ -677,5 +680,10 @@ pub fn create_http_client(tls_config: TlsConfig) -> ServoClient {
         // limit controls the maximum idle connections per host, which we still don't want to grow
         // without bound.
         .pool_max_idle_per_host(6)
+        // hyper advertises SETTINGS_MAX_HEADER_LIST_SIZE of 16 KiB by default, and h2 resets
+        // any response whose header block is larger (RFC 9113, section 6.5.2, counts each field
+        // as name + value + 32 octets). Real sites exceed that: YouTube's embed page sends about
+        // 16.8 KB of policy headers to a browser user agent. Chromium allows 256 KiB.
+        .http2_max_header_list_size(HTTP2_MAX_HEADER_LIST_SIZE)
         .build(InstrumentedConnector::from(connector))
 }
