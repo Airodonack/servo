@@ -240,9 +240,13 @@ fn sniff_adaptive_streaming_manifest(bytes: &[u8]) -> ManifestSniff {
     }
 }
 
-/// The same tolerance before the first buffered range, where Chrome lets a position within a
-/// second of it play from its first frame: media often starts a little after zero.
-const MEDIA_SOURCE_FIRST_RANGE_START_TOLERANCE: f64 = 1.0;
+/// With a MediaSource attached, a first buffered range that starts before this time is the start
+/// of the media: a current playback position anywhere before it counts as in it, and playback
+/// starts at its first frame. Media often starts a little after zero (the first frames of an
+/// MPEG-4 file at their composition offset, audio after its priming samples). This is Chrome's
+/// rule (`kSeekToStartFudgeRoom`, one second, compared with `<`); a first range starting later
+/// gets only the ordinary tolerance, as in Chrome.
+const MEDIA_SOURCE_START_OF_MEDIA: f64 = 1.0;
 
 /// With a MediaSource attached, buffered media this far ahead of the current playback position,
 /// or up to the end of the media, is "enough data to ensure uninterrupted playback"
@@ -3578,12 +3582,9 @@ impl HTMLMediaElement {
             .iter()
             .enumerate()
             .find(|(index, (start, end))| {
-                let tolerance = if *index == 0 {
-                    MEDIA_SOURCE_FIRST_RANGE_START_TOLERANCE
-                } else {
-                    MEDIA_SOURCE_RANGE_START_TOLERANCE
-                };
-                position >= start - tolerance && position <= *end
+                let start_of_media = *index == 0 && *start < MEDIA_SOURCE_START_OF_MEDIA;
+                (start_of_media || position >= start - MEDIA_SOURCE_RANGE_START_TOLERANCE) &&
+                    position <= *end
             })
             .map(|(_, (_, end))| *end);
 
