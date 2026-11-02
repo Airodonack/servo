@@ -1413,6 +1413,11 @@ impl From<stylo::Display> for Display {
                 is_list_item: packed.is_list_item(),
             },
             stylo::DisplayInside::Flex => DisplayInside::Flex,
+            // A `-webkit-box` is laid out as a flex container whose direction comes from
+            // `-webkit-box-orient` (see `FlexContainerConfig`). One that clamps its lines
+            // has already become `flow-root` or `inline-block` in the style system.
+            // <https://drafts.csswg.org/css-overflow-4/#webkit-line-clamp>
+            stylo::DisplayInside::WebkitBox => DisplayInside::Flex,
             stylo::DisplayInside::Grid => DisplayInside::Grid,
             stylo::DisplayInside::GridLanes => unreachable!("Should be disabled behind a pref"),
             stylo::DisplayInside::Table => DisplayInside::Table,
