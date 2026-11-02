@@ -124,15 +124,16 @@ impl InputMethodTest {
                 let JSValue::Object(mut object) = js_value else {
                     panic!("Should not put non-object into window.input_method_test_received");
                 };
-                let Some(JSValue::String(name)) = object.remove("name") else {
+                let Some(JSValue::String(name)) = object.shift_remove("name") else {
                     panic!("name should be a string");
                 };
                 let event = match name.as_str() {
                     "beforeinput" | "input" => {
-                        let Some(JSValue::String(input_type)) = object.remove("inputType") else {
+                        let Some(JSValue::String(input_type)) = object.shift_remove("inputType")
+                        else {
                             panic!("inputType should be a string");
                         };
-                        let data = match object.remove("data").unwrap() {
+                        let data = match object.shift_remove("data").unwrap() {
                             JSValue::String(data) => Some(data),
                             JSValue::Null => None,
                             _ => panic!("data should be null or a string"),
@@ -145,7 +146,7 @@ impl InputMethodTest {
                     },
                     "compositionstart" => InputMethodEvent::CompositionStart,
                     "compositionupdate" | "compositionend" => {
-                        let Some(JSValue::String(data)) = object.remove("data") else {
+                        let Some(JSValue::String(data)) = object.shift_remove("data") else {
                             panic!("data should be null or a string");
                         };
                         if name == "compositionupdate" {

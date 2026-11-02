@@ -2,7 +2,7 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at https://mozilla.org/MPL/2.0/. */
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::ffi::CString;
 use std::ptr::NonNull;
 
@@ -14,6 +14,7 @@ use embedder_traits::{
 };
 use euclid::default::{Point2D, Rect, Size2D};
 use hyper_serde::Serde;
+use indexmap::IndexMap;
 use js::context::JSContext;
 use js::conversions::{FromJSValConvertible, jsstr_to_string};
 use js::jsapi::{HandleValueArray, JSITER_OWNONLY, JSType, PropertyDescriptor};
@@ -561,7 +562,7 @@ fn clone_an_object(
         }
         Ok(JSValue::Array(result))
     } else {
-        let mut result = HashMap::new();
+        let mut result = IndexMap::new();
 
         let mut ids = IdVector::new(cx);
         let succeeded = GetPropertyKeys(cx, object_handle, JSITER_OWNONLY, ids.handle_mut());
