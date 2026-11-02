@@ -6,8 +6,8 @@ use std::cell::{Cell, RefCell};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex, Once};
-use std::time;
+use std::sync::{Arc, Mutex, Once, OnceLock, Weak};
+use std::{thread, time};
 
 use byte_slice_cast::AsSliceOf;
 use glib;
@@ -154,9 +154,96 @@ struct PlayerInner {
     last_metadata: Option<Metadata>,
     cat: gstreamer::DebugCategory,
     enough_data: Arc<AtomicBool>,
+    /// The signal adapter's handlers that reach this state.
+    handlers: Vec<glib::SignalHandlerId>,
+    /// The pipeline's `source-setup` handler, which reaches this state.
+    source_setup_handler: Option<glib::SignalHandlerId>,
+    /// Answers the source's `seek-data` callback, which waits on the script
+    /// thread while a seek is under way.
+    seek_lock: Option<SeekLock>,
+}
+
+/// The main context the players' signal adapters emit on, run by one thread
+/// for the process. GstPlay's messages wait on its bus until this thread
+/// dispatches and frees them, so the references they hold to the GstPlay are
+/// never dropped on GstPlay's own thread or a streaming thread.
+fn signal_context() -> &'static glib::MainContext {
+    static CONTEXT: OnceLock<glib::MainContext> = OnceLock::new();
+    CONTEXT.get_or_init(|| {
+        let context = glib::MainContext::new();
+        let main_loop = glib::MainLoop::new(Some(&context), false);
+        thread::Builder::new()
+            .name("GStreamerPlayer signals".to_owned())
+            .spawn(move || main_loop.run())
+            .expect("Could not spawn the GStreamerPlayer signals thread");
+        context
+    })
+}
+
+/// Sends a dropped player's state to the thread that tears it down, one for
+/// the process, so that the dropping thread never waits on GstPlay's thread.
+fn tear_down_later(state: PlayerInner) {
+    static TEARDOWN: OnceLock<Mutex<Sender<PlayerInner>>> = OnceLock::new();
+    let sender = TEARDOWN.get_or_init(|| {
+        let (sender, receiver) = mpsc::channel::<PlayerInner>();
+        thread::Builder::new()
+            .name("GStreamerPlayer teardown".to_owned())
+            .spawn(move || {
+                for state in receiver {
+                    state.tear_down();
+                }
+            })
+            .expect("Could not spawn the GStreamerPlayer teardown thread");
+        Mutex::new(sender)
+    });
+    let _ = sender.lock().unwrap().send(state);
 }
 
 impl PlayerInner {
+    /// Frees the GstPlay, then its signal adapter. Freeing the adapter flushes
+    /// GstPlay's bus, after which GstPlay's threads drop each message they post
+    /// themselves, and one of those could hold the last reference; so the
+    /// adapter goes only once the GstPlay has been disposed.
+    fn tear_down(self) {
+        // A seek waiting for the script thread would never be answered, and
+        // GstPlay's dispose would wait for it.
+        if let Some(seek_lock) = &self.seek_lock {
+            let (ack_sender, _ack_receiver) =
+                generic_channel::channel::<()>().expect("Could not create IPC channel");
+            let _ = seek_lock.lock_channel.send((false, ack_sender));
+        }
+        let PlayerInner {
+            player,
+            signal_adapter,
+            ..
+        } = self;
+        let (disposed_sender, disposed) = mpsc::channel();
+        player.add_weak_ref_notify(move || {
+            let _ = disposed_sender.send(());
+        });
+        drop(player);
+        // Messages still on the bus hold the GstPlay until the signals thread
+        // dispatches them.
+        if disposed
+            .recv_timeout(time::Duration::from_secs(10))
+            .is_err()
+        {
+            log::warn!("GstPlay outlived its player; keeping its signal adapter");
+            std::mem::forget(signal_adapter);
+        }
+    }
+
+    /// Disconnects the handlers that reach this state, so that none starts
+    /// after this returns.
+    fn disconnect_handlers(&mut self) {
+        for handler in self.handlers.drain(..) {
+            self.signal_adapter.disconnect(handler);
+        }
+        if let Some(handler) = self.source_setup_handler.take() {
+            self.player.pipeline().disconnect(handler);
+        }
+    }
+
     pub fn set_input_size(&mut self, size: u64) -> Result<(), PlayerError> {
         // Set input_size to proxy its value, since it
         // could be set by the user before calling .setup().
@@ -519,7 +606,8 @@ impl GStreamerPlayer {
         }
 
         let player = gstreamer_play::Play::default();
-        let signal_adapter = gstreamer_play::PlaySignalAdapter::new_sync_emit(&player);
+        let signal_adapter =
+            gstreamer_play::PlaySignalAdapter::with_main_context(&player, signal_context());
         let pipeline = player.pipeline();
 
         // FIXME(#282): The progressive downloading breaks playback on Windows and Android.
@@ -671,6 +759,9 @@ impl GStreamerPlayer {
             last_metadata: None,
             cat: gstreamer::DebugCategory::get("servoplayer").unwrap(),
             enough_data: Arc::new(AtomicBool::new(false)),
+            handlers: Vec::new(),
+            source_setup_handler: None,
+            seek_lock: None,
         })));
 
         let inner = self.inner.borrow();
@@ -687,11 +778,18 @@ impl GStreamerPlayer {
             let _ = notify!(observer, PlayerEvent::Error(error.to_string()));
         });
 
-        let inner_clone = inner.clone();
+        // The handlers below hold the player's state weakly: the signal adapter
+        // and the pipeline they are connected to belong to that state, so a
+        // strong reference would keep the whole pipeline alive after the
+        // player is dropped.
+        let weak_inner = Arc::downgrade(inner);
         let observer = self.observer.clone();
         // Handle `state-changed` signal.
-        signal_adapter.connect_state_changed(move |_, play_state| {
-            inner_clone.lock().unwrap().play_state = play_state;
+        let state_changed = signal_adapter.connect_state_changed(move |_, play_state| {
+            let Some(inner) = weak_inner.upgrade() else {
+                return;
+            };
+            inner.lock().unwrap().play_state = play_state;
 
             let state = match play_state {
                 gstreamer_play::PlayState::Buffering => Some(PlaybackState::Buffering),
@@ -720,14 +818,17 @@ impl GStreamerPlayer {
         });
 
         // Handle `media-info-updated` signal.
-        let inner_clone = inner.clone();
+        let weak_inner = Arc::downgrade(inner);
         let observer = self.observer.clone();
-        signal_adapter.connect_media_info_updated(move |_, info| {
+        let media_info_updated = signal_adapter.connect_media_info_updated(move |_, info| {
             let Ok(metadata) = metadata_from_media_info(info) else {
                 return;
             };
+            let Some(inner) = weak_inner.upgrade() else {
+                return;
+            };
 
-            let mut inner = inner_clone.lock().unwrap();
+            let mut inner = inner.lock().unwrap();
 
             if inner.last_metadata.as_ref() == Some(&metadata) {
                 return;
@@ -764,9 +865,9 @@ impl GStreamerPlayer {
         });
 
         // Handle `duration-changed` signal.
-        let inner_clone = inner.clone();
+        let weak_inner = Arc::downgrade(inner);
         let observer = self.observer.clone();
-        signal_adapter.connect_duration_changed(move |_, duration| {
+        let duration_changed = signal_adapter.connect_duration_changed(move |_, duration| {
             let duration = duration.map(|duration| {
                 time::Duration::new(
                     duration.seconds(),
@@ -774,7 +875,10 @@ impl GStreamerPlayer {
                 )
             });
 
-            let mut inner = inner_clone.lock().unwrap();
+            let Some(inner) = weak_inner.upgrade() else {
+                return;
+            };
+            let mut inner = inner.lock().unwrap();
             if let Some(ref mut metadata) = inner.last_metadata &&
                 metadata.duration != duration
             {
@@ -788,6 +892,7 @@ impl GStreamerPlayer {
                 let _ = notify!(observer, PlayerEvent::DurationChanged(duration));
             }
         });
+        inner.lock().unwrap().handlers = vec![state_changed, media_info_updated, duration_changed];
 
         if let Some(video_renderer) = self.video_renderer.clone() {
             // Creates a closure that renders a frame using the video_renderer
@@ -841,8 +946,8 @@ impl GStreamerPlayer {
         };
 
         let (receiver, error_handler_id) = {
-            let inner_clone = inner.clone();
-            let inner = inner.lock().unwrap();
+            let weak_inner: Weak<Mutex<PlayerInner>> = Arc::downgrade(inner);
+            let mut inner = inner.lock().unwrap();
             let pipeline = inner.player.pipeline();
 
             let (sender, receiver) = mpsc::channel();
@@ -851,10 +956,11 @@ impl GStreamerPlayer {
             let sender_clone = sender.clone();
             let is_ready_clone = self.is_ready.clone();
             let observer = self.observer.clone();
-            pipeline.connect("source-setup", false, move |args| {
+            let source_setup = pipeline.connect("source-setup", false, move |args| {
                 let source = args[1].get::<gstreamer::Element>().unwrap();
 
-                let mut inner = inner_clone.lock().unwrap();
+                let inner = weak_inner.upgrade()?;
+                let mut inner = inner.lock().unwrap();
                 let source = match inner.stream_type {
                     StreamType::Seekable => {
                         let servosrc = source
@@ -871,10 +977,12 @@ impl GStreamerPlayer {
                         let observer_ = observer.clone();
                         let observer__ = observer.clone();
                         let observer___ = observer.clone();
-                        let servosrc_ = servosrc.clone();
+                        // Weak: these callbacks belong to the source's own appsrc.
+                        let weak_servosrc = servosrc.downgrade();
                         let enough_data_ = inner.enough_data.clone();
                         let enough_data__ = inner.enough_data.clone();
                         let seek_channel = Arc::new(Mutex::new(SeekChannel::new()));
+                        inner.seek_lock = Some(seek_channel.lock().unwrap().sender());
                         servosrc.set_callbacks(
                             gstreamer_app::AppSrcCallbacks::builder()
                                 .need_data(move |_, _| {
@@ -895,7 +1003,10 @@ impl GStreamerPlayer {
                                     let _ = notify!(observer__, PlayerEvent::EnoughData);
                                 })
                                 .seek_data(move |_, offset| {
-                                    let (ret, ack_channel) = if servosrc_.set_seek_offset(offset) {
+                                    let Some(servosrc) = weak_servosrc.upgrade() else {
+                                        return false;
+                                    };
+                                    let (ret, ack_channel) = if servosrc.set_seek_offset(offset) {
                                         let _ = notify!(
                                             observer___,
                                             PlayerEvent::SeekData(
@@ -910,9 +1021,11 @@ impl GStreamerPlayer {
                                         (true, None)
                                     };
 
-                                    servosrc_.set_seek_done();
+                                    servosrc.set_seek_done();
                                     if let Some(ack_channel) = ack_channel {
-                                        ack_channel.send(()).unwrap();
+                                        // Nobody waits for the acknowledgement of
+                                        // the answer sent at teardown.
+                                        let _ = ack_channel.send(());
                                     }
                                     ret
                                 })
@@ -937,6 +1050,7 @@ impl GStreamerPlayer {
 
                 None
             });
+            inner.source_setup_handler = Some(source_setup);
 
             let error_handler_id =
                 signal_adapter.connect_error(move |signal_adapter, error, _details| {
@@ -1065,6 +1179,25 @@ impl MediaInstance for GStreamerPlayer {
 impl Drop for GStreamerPlayer {
     fn drop(&mut self) {
         let _ = self.stop();
+        if let Some(mut inner) = self.inner.borrow_mut().take() {
+            inner.lock().unwrap().disconnect_handlers();
+            // A handler that was already running may still hold the state for a
+            // moment. Wait for it, so that the state, and the GstPlay and signal
+            // adapter in it, are freed by the teardown thread: freed by a
+            // handler, they would be freed inside their own signal emission.
+            loop {
+                match Arc::try_unwrap(inner) {
+                    Ok(state) => {
+                        tear_down_later(state.into_inner().unwrap());
+                        break;
+                    },
+                    Err(shared) => {
+                        inner = shared;
+                        std::thread::yield_now();
+                    },
+                }
+            }
+        }
         let (tx_ack, rx_ack) = mpsc::channel();
         let _ = self
             .backend_chan
