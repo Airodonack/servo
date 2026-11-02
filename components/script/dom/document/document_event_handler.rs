@@ -1351,11 +1351,11 @@ impl DocumentEventHandler {
             EventCancelable::Cancelable, // cancelable
             Some(&self.window),          // view
             0,                           // detail
-            hit_test_result.point_in_frame.to_i32(),
-            hit_test_result.point_in_frame.to_i32(),
+            hit_test_result.point_in_frame.cast(),
+            hit_test_result.point_in_frame.cast(),
             hit_test_result
                 .point_relative_to_initial_containing_block
-                .to_i32(),
+                .cast(),
             input_event.active_keyboard_modifiers,
             MouseButton::Secondary,
             input_event.pressed_mouse_buttons,
@@ -1927,11 +1927,11 @@ impl DocumentEventHandler {
             cancelable,
             Some(&self.window),
             0i32,
-            hit_test_result.point_in_frame.to_i32(),
-            hit_test_result.point_in_frame.to_i32(),
+            hit_test_result.point_in_frame.cast(),
+            hit_test_result.point_in_frame.cast(),
             hit_test_result
                 .point_relative_to_initial_containing_block
-                .to_i32(),
+                .cast(),
             input_event.active_keyboard_modifiers,
             MouseButton::Primary,
             input_event.pressed_mouse_buttons,
@@ -2705,9 +2705,9 @@ impl DocumentEventHandler {
             EventCancelable::NotCancelable,
             Some(&self.window),
             0,
-            Point2D::new(0, 0),
-            Point2D::new(0, 0),
-            Point2D::new(0, 0),
+            Point2D::zero(),
+            Point2D::zero(),
+            Point2D::zero(),
             Modifiers::empty(),
             MouseButton::Primary,
             MouseButtons::empty(),
@@ -2755,9 +2755,9 @@ impl DocumentEventHandler {
             EventCancelable::NotCancelable,
             Some(&self.window),
             0,
-            Point2D::new(0, 0),
-            Point2D::new(0, 0),
-            Point2D::new(0, 0),
+            Point2D::zero(),
+            Point2D::zero(),
+            Point2D::zero(),
             Modifiers::empty(),
             MouseButton::None,
             self.mouse_button_state.get(),
