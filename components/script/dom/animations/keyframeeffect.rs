@@ -21,11 +21,16 @@ use js::rust::{
 };
 use rustc_hash::FxHashMap;
 use script_bindings::cell::DomRefCell;
+use script_bindings::codegen::GenericBindings::AnimationEffectBinding::{
+    EffectTiming, OptionalEffectTiming,
+};
 use script_bindings::codegen::GenericBindings::KeyframeEffectBinding::{
     BaseKeyframe, CompositeOperationOrAuto,
 };
 use script_bindings::codegen::GenericBindings::WindowBinding::WindowMethods;
-use script_bindings::codegen::GenericUnionTypes::UnrestrictedDoubleOrKeyframeEffectOptions;
+use script_bindings::codegen::GenericUnionTypes::{
+    UnrestrictedDoubleOrKeyframeEffectOptions, UnrestrictedDoubleOrString,
+};
 use script_bindings::conversions::StringificationBehavior;
 use script_bindings::error::{Error, Fallible};
 use script_bindings::inheritance::Castable;
@@ -102,8 +107,8 @@ impl KeyframeEffectMethods<crate::DomTypeHolder> for KeyframeEffect {
         _: Option<HandleObject>,
         target: Option<&Element>,
         keyframes: *mut JSObject,
-        _options: UnrestrictedDoubleOrKeyframeEffectOptions,
-    ) -> DomRoot<KeyframeEffect> {
+        options: UnrestrictedDoubleOrKeyframeEffectOptions,
+    ) -> Fallible<DomRoot<KeyframeEffect>> {
         // Step 1. Create a new KeyframeEffect object, effect.
         let effect = KeyframeEffect::new(cx, window);
 
@@ -113,12 +118,38 @@ impl KeyframeEffectMethods<crate::DomTypeHolder> for KeyframeEffect {
         // TODO: Step 3. Set the target pseudo-selector to the result corresponding to
         // the first matching condition below:
 
-        // TODO: Step 4. Let timing input be the result corresponding to the first matching
+        // Step 4. Let timing input be the result corresponding to the first matching
         // condition below:
+        let timing_input = match options {
+            // > If options is a KeyframeEffectOptions object, Let timing input be options.
+            UnrestrictedDoubleOrKeyframeEffectOptions::KeyframeEffectOptions(options) => {
+                options.parent
+            },
+            // > Otherwise (if options is a double), Let timing input be a new EffectTiming
+            // > object with all members set to their default values and duration set to options.
+            UnrestrictedDoubleOrKeyframeEffectOptions::UnrestrictedDouble(duration) => {
+                EffectTiming {
+                    duration: UnrestrictedDoubleOrString::UnrestrictedDouble(duration),
+                    ..EffectTiming::empty()
+                }
+            },
+        };
 
         // Step 5. Call the procedure to update the timing properties of an animation effect of
         // effect from timing input.
         // If that procedure causes an exception to be thrown, propagate the exception and abort this procedure.
+        effect
+            .upcast::<AnimationEffect>()
+            .update_the_timing_properties(&OptionalEffectTiming {
+                delay: Some(timing_input.delay),
+                endDelay: Some(timing_input.endDelay),
+                fill: Some(timing_input.fill),
+                iterationStart: Some(timing_input.iterationStart),
+                iterations: Some(timing_input.iterations),
+                duration: Some(timing_input.duration),
+                direction: Some(timing_input.direction),
+                easing: Some(timing_input.easing),
+            })?;
 
         // TODO: Step 6. If options is a KeyframeEffectOptions object, assign the composite property of effect
         // to the corresponding value from options.
@@ -131,7 +162,7 @@ impl KeyframeEffectMethods<crate::DomTypeHolder> for KeyframeEffect {
         // passing keyframes as the input.
         effect.SetKeyframes(cx, keyframes);
 
-        effect
+        Ok(effect)
     }
 
     /// <https://drafts.csswg.org/web-animations-1/#dom-keyframeeffect-getkeyframes>
