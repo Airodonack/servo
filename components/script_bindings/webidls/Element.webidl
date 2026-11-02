@@ -98,11 +98,22 @@ dictionary ShadowRootInit {
   boolean serializable = false;
 };
 
+// https://drafts.csswg.org/cssom-view/#dictdef-checkvisibilityoptions
+dictionary CheckVisibilityOptions {
+  boolean checkOpacity = false;
+  boolean checkVisibilityCSS = false;
+  boolean contentVisibilityAuto = false;
+  boolean opacityProperty = false;
+  boolean visibilityProperty = false;
+};
+
 // http://dev.w3.org/csswg/cssom-view/#extensions-to-the-element-interface
 partial interface Element {
   DOMRectList getClientRects();
   [NewObject]
   DOMRect getBoundingClientRect();
+
+  boolean checkVisibility(optional CheckVisibilityOptions options = {});
 
   undefined scrollIntoView(optional (boolean or ScrollIntoViewOptions) arg = {});
   undefined scroll(optional ScrollToOptions options = {});
