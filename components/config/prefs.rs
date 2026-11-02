@@ -510,7 +510,7 @@ impl Preferences {
             dom_touch_events_legacy_apis_enabled: cfg!(target_os = "android") |
                 cfg!(target_env = "ohos"),
             dom_transient_activation_duration_ms: 5000,
-            dom_web_animations_enabled: false,
+            dom_web_animations_enabled: true,
             dom_webgl2_enabled: false,
             dom_webgpu_enabled: false,
             dom_webgpu_wgpu_backend: String::new(),
