@@ -82,8 +82,8 @@ impl ImageInputType {
         };
         let rect = input.upcast::<Node>().client_rect(cx);
         self.selected_coordinate.set(Point2D::new(
-            mouse_event.ClientX() - rect.origin.x,
-            mouse_event.ClientY() - rect.origin.y,
+            *mouse_event.ClientX() as i32 - rect.origin.x,
+            *mouse_event.ClientY() as i32 - rect.origin.y,
         ));
     }
 
