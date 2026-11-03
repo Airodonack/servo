@@ -355,6 +355,9 @@ pub(crate) struct HTMLMediaElement {
     /// from there (a MediaSource that reopened and got more media) first seeks the player to the
     /// current playback position: GStreamer's player starts over from zero otherwise.
     player_ended: Cell<bool>,
+    /// Whether the player reported a seek done, during the current seek, at a position away
+    /// from the new playback position: the end of a seek of its own, not of this one.
+    seek_done_elsewhere: Cell<bool>,
     /// <https://html.spec.whatwg.org/multipage/#dom-media-error>
     error: MutNullableDom<MediaError>,
     /// The MediaSource attached to this element, while one is.
@@ -591,6 +594,7 @@ impl HTMLMediaElement {
             media_source_error_reported: Cell::new(false),
             media_source_seek_done: Cell::new(false),
             player_ended: Cell::new(false),
+            seek_done_elsewhere: Cell::new(false),
             error: Default::default(),
             media_source: Default::default(),
             paused: Cell::new(true),
@@ -2380,6 +2384,7 @@ impl HTMLMediaElement {
         // for the step that it is running to complete.
         self.current_seek_position.set(f64::NAN);
         self.media_source_seek_done.set(false);
+        self.seek_done_elsewhere.set(false);
 
         // Step 4. Set the seeking IDL attribute to true.
         self.seeking.set(true);
@@ -3485,6 +3490,16 @@ impl HTMLMediaElement {
     fn playback_position_changed(&self, cx: &mut JSContext, position: f64) {
         // Abort the following steps of the current time update if seeking is in progress.
         if self.seeking.get() {
+            // GStreamer's player, paused after its end of stream, seeks to the beginning on its
+            // own. A seek asked for before that seek's media is shown ends with a single
+            // seek-done, for the player's own seek and at the position from before it, and none
+            // follows for the seek asked for. The player reports its position once that seek
+            // is done: a position at the new playback position ends the seek then.
+            if self.seek_done_elsewhere.get() &&
+                (position - self.current_seek_position.get()).abs() <= SEEK_POSITION_THRESHOLD
+            {
+                self.playback_seek_done(cx, position);
+            }
             return;
         }
 
@@ -3549,7 +3564,11 @@ impl HTMLMediaElement {
         // If the seek was initiated by script or by the user agent itself continue with the
         // following steps, otherwise abort.
         let delta = (position - self.current_seek_position.get()).abs();
-        if !self.seeking.get() || delta > SEEK_POSITION_THRESHOLD {
+        if !self.seeking.get() {
+            return;
+        }
+        if delta > SEEK_POSITION_THRESHOLD {
+            self.seek_done_elsewhere.set(true);
             return;
         }
 
