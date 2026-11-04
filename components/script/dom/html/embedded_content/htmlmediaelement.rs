@@ -351,10 +351,6 @@ pub(crate) struct HTMLMediaElement {
     /// the new playback position to be buffered.
     /// <https://w3c.github.io/media-source/#mediasource-seeking>
     media_source_seek_done: Cell<bool>,
-    /// Whether the player reported its end of stream with no seek since. Playback that resumes
-    /// from there (a MediaSource that reopened and got more media) first seeks the player to the
-    /// current playback position: GStreamer's player starts over from zero otherwise.
-    player_ended: Cell<bool>,
     /// Whether the player reported a seek done, during the current seek, at a position away
     /// from the new playback position: the end of a seek of its own, not of this one.
     seek_done_elsewhere: Cell<bool>,
@@ -593,7 +589,6 @@ impl HTMLMediaElement {
             end_of_playback_reached: Cell::new(false),
             media_source_error_reported: Cell::new(false),
             media_source_seek_done: Cell::new(false),
-            player_ended: Cell::new(false),
             seek_done_elsewhere: Cell::new(false),
             error: Default::default(),
             media_source: Default::default(),
@@ -676,7 +671,12 @@ impl HTMLMediaElement {
                 if let Err(error) = player.set_volume(self.volume.get()) {
                     warn!("Could not set the volume: {error:?}");
                 }
-                if self.player_ended.take() &&
+                // Playback that resumes after the player's end of media without a seek (a
+                // MediaSource that reopened and got more media) first seeks the player to the
+                // current playback position: GStreamer's player starts over from zero otherwise.
+                // The player answers for its own state now; the end-of-stream report may still
+                // wait in the task queue, or predate a seek done since.
+                if player.at_end_of_media() &&
                     let Err(error) = player.seek(self.current_playback_position.get())
                 {
                     warn!("Could not seek the player to resume after its end: {error:?}");
@@ -2084,7 +2084,6 @@ impl HTMLMediaElement {
         self.end_of_playback_reached.set(false);
         self.media_source_error_reported.set(false);
         self.media_source_seek_done.set(false);
-        self.player_ended.set(false);
 
         // TODO Step 1. Set this element's is currently stalled to false.
 
@@ -2461,10 +2460,7 @@ impl HTMLMediaElement {
         let refused = self.player.borrow().as_ref().and_then(|player| {
             let player = player.lock().unwrap();
             match player.seek(time) {
-                Ok(()) => {
-                    self.player_ended.set(false);
-                    None
-                },
+                Ok(()) => None,
                 Err(error) => Some((error, player.position())),
             }
         });
@@ -5282,10 +5278,7 @@ impl HTMLMediaElementEventHandler {
                     element.playback_duration_changed(duration);
                 }
             },
-            PlayerEvent::EndOfStream => {
-                element.player_ended.set(true);
-                element.playback_end(cx);
-            },
+            PlayerEvent::EndOfStream => element.playback_end(cx),
             PlayerEvent::EnoughData => element.playback_enough_data(),
             PlayerEvent::Error(ref error) => element.playback_error(cx, error),
             PlayerEvent::MetadataUpdated(ref metadata) => {

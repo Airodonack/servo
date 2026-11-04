@@ -129,6 +129,11 @@ pub trait Player: Send + MediaInstance {
     fn end_of_stream(&self) -> Result<(), PlayerError>;
     /// Get the list of time ranges in seconds that have been buffered.
     fn buffered(&self) -> Vec<Range<f64>>;
+    /// Whether the player has reached the end of its media, and has not been asked to seek
+    /// since. Played from there, a player may start over from the beginning.
+    fn at_end_of_media(&self) -> bool {
+        false
+    }
     /// Set the stream to be played by the player.
     /// Only a single stream of the same type (audio or video) can be set.
     /// Subsequent calls with a stream of the same type will override the previously
