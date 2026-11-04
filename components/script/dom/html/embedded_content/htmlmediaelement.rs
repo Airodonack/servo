@@ -404,6 +404,9 @@ pub(crate) struct HTMLMediaElement {
     /// initiated by a script or by the user agent itself, rather than by the media engine and to
     /// abort other running instance of the `seek` algorithm.
     current_seek_position: Cell<f64>,
+    /// Counts the instances of the `seek` algorithm, so that a task queued for one can tell
+    /// whether another has replaced it, even one to the same position.
+    seek_count: Cell<u64>,
     /// <https://html.spec.whatwg.org/multipage/#concept-media-muted-state>
     /// > Each media element has a muted state, which is either true, false,
     /// > or "default"; it is initially "default".
@@ -620,6 +623,7 @@ impl HTMLMediaElement {
             volume: Cell::new(1.0),
             seeking: Cell::new(false),
             current_seek_position: Cell::new(f64::NAN),
+            seek_count: Cell::new(0),
             resource_url: DomRefCell::new(None),
             blob_url: DomRefCell::new(None),
             played: DomRefCell::new(TimeRangesContainer::default()),
@@ -2382,6 +2386,7 @@ impl HTMLMediaElement {
         // algorithm is already running. Abort that other instance of the algorithm without waiting
         // for the step that it is running to complete.
         self.current_seek_position.set(f64::NAN);
+        self.seek_count.set(self.seek_count.get().wrapping_add(1));
         self.media_source_seek_done.set(false);
         self.seek_done_elsewhere.set(false);
 
@@ -2475,7 +2480,7 @@ impl HTMLMediaElement {
             let position = player_position.unwrap_or(position_before_seek);
             warn!("The player refused the seek to {time}: {error:?}; ending it at {position}");
             self.current_playback_position.set(position);
-            self.queue_seek_end_after_refused_seek(time);
+            self.queue_seek_end_after_refused_seek();
             return;
         }
 
@@ -2499,9 +2504,11 @@ impl HTMLMediaElement {
     /// another seek has replaced it.
     ///
     /// <https://html.spec.whatwg.org/multipage/#dom-media-seek>
-    fn queue_seek_end_after_refused_seek(&self, target: f64) {
+    fn queue_seek_end_after_refused_seek(&self) {
         let this = Trusted::new(self);
         let generation_id = self.generation_id.get();
+        // A later seek to the same position, one the player accepts, must not be ended here.
+        let seek_count = self.seek_count.get();
 
         self.owner_global()
             .task_manager()
@@ -2510,7 +2517,7 @@ impl HTMLMediaElement {
                 let this = this.root();
                 if generation_id != this.generation_id.get() ||
                     !this.seeking.get() ||
-                    this.current_seek_position.get() != target
+                    this.seek_count.get() != seek_count
                 {
                     return;
                 }
