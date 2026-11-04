@@ -512,7 +512,7 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
     }
 
     /// <https://w3c.github.io/media-source/#dom-sourcebuffer-abort>
-    fn Abort(&self, _cx: &mut JSContext) -> ErrorResult {
+    fn Abort(&self, cx: &mut JSContext) -> ErrorResult {
         // Step 1. If this object has been removed from the sourceBuffers
         // attribute of the parent media source then throw an InvalidStateError
         // exception.
@@ -535,7 +535,8 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
         }
         // Steps 4-5. If the buffer append algorithm is running, abort it: set
         // updating to false and queue abort and updateend.
-        if self.updating.get() {
+        let aborted_append = self.updating.get();
+        if aborted_append {
             self.abort_update();
         } else if let Err(error) = self.with_handle(|handle| handle.abort())? {
             warn!("The backend refused the abort: {error:?}");
@@ -543,6 +544,13 @@ impl SourceBufferMethods<crate::DomTypeHolder> for SourceBuffer {
         // Steps 6-7. Run the reset parser state algorithm, set
         // appendWindowStart to 0 and appendWindowEnd to positive Infinity.
         self.reset_after_abort();
+        // The coded frames the aborted append processed stay buffered, and coded frame
+        // processing, steps 2-4, sets readyState as each is added. An append that ends here
+        // never reaches update, so readyState follows them now, or playback (or a seek)
+        // waiting for those frames stays stuck.
+        if aborted_append {
+            self.media_source.buffered_changed(cx);
+        }
         Ok(())
     }
 
