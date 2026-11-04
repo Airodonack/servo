@@ -1305,8 +1305,10 @@ impl consoleMethods<crate::DomTypeHolder> for Console {
         item: HandleValue,
         _options: Option<*mut jsapi::JSObject>,
     ) {
+        // The embedder's string is made from the devtools preview, so the preview is built even
+        // when the devtools server is off: its walk is bounded, and the string stays the same.
         #[cfg(feature = "devtools")]
-        if global.devtools_chan().is_some() {
+        {
             // Step 1. Let object be item with generic JavaScript object formatting applied.
             let argument = devtools::console_argument_from_handle_value(
                 cx,
@@ -1324,15 +1326,17 @@ impl consoleMethods<crate::DomTypeHolder> for Console {
                 ConsoleLogLevel::Dir,
                 format!("{prefix}{}", stringify_debugger_value(&argument)),
             );
-            return;
         }
 
-        let prefix = global.current_group_label().unwrap_or_default();
-        Self::send_to_embedder(
-            global,
-            ConsoleLogLevel::Dir,
-            format!("{prefix}{}", stringify_handle_value(cx, item)),
-        );
+        #[cfg(not(feature = "devtools"))]
+        {
+            let prefix = global.current_group_label().unwrap_or_default();
+            Self::send_to_embedder(
+                global,
+                ConsoleLogLevel::Dir,
+                format!("{prefix}{}", stringify_handle_value(cx, item)),
+            );
+        }
     }
 
     /// <https://developer.mozilla.org/en-US/docs/Web/API/Console/assert>

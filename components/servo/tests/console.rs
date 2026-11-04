@@ -6,7 +6,8 @@
 //!
 //! The devtools server makes each console call build a preview of its arguments for a
 //! devtools client. These tests check that the preview stays bounded for object graphs
-//! that are large through sharing or depth.
+//! that are large through sharing or depth, and that the embedder's string does not depend
+//! on whether the server runs.
 
 mod common;
 
@@ -72,6 +73,9 @@ const LOG_DEEP_CHAIN: &str = "let o = {end: true}; \
     for (let i = 0; i < 100000; i++) o = {next: o}; \
     console.log(o); console.dir(o)";
 
+const DIR_NESTED_OBJECT: &str = "console.dir({a: {b: [1, 2]}, s: 'x', n: null})";
+const DIR_NESTED_OBJECT_STRING: &str = "Object {a: Object {b: [1, 2]}, s: x, n: null}";
+
 #[test]
 fn test_console_log_of_shared_graph_with_devtools_server() {
     assert_eq!(console_messages(true, LOG_SHARED_GRAPH).len(), 3);
@@ -85,4 +89,20 @@ fn test_console_log_of_shared_graph_without_devtools_server() {
 #[test]
 fn test_console_log_of_deep_chain_with_devtools_server() {
     assert_eq!(console_messages(true, LOG_DEEP_CHAIN).len(), 2);
+}
+
+#[test]
+fn test_console_dir_string_with_devtools_server() {
+    assert_eq!(
+        console_messages(true, DIR_NESTED_OBJECT),
+        [DIR_NESTED_OBJECT_STRING]
+    );
+}
+
+#[test]
+fn test_console_dir_string_without_devtools_server() {
+    assert_eq!(
+        console_messages(false, DIR_NESTED_OBJECT),
+        [DIR_NESTED_OBJECT_STRING]
+    );
 }
