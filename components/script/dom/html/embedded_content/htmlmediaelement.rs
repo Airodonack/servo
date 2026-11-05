@@ -3315,7 +3315,7 @@ impl HTMLMediaElement {
         }
     }
 
-    fn playback_seek_done(&self, cx: &JSContext, position: f64) {
+    fn playback_seek_done(&self, cx: &mut JSContext, position: f64) {
         // If the seek was initiated by script or by the user agent itself continue with the
         // following steps, otherwise abort.
         let delta = (position - self.current_seek_position.get()).abs();
@@ -3324,6 +3324,23 @@ impl HTMLMediaElement {
         }
 
         // <https://html.spec.whatwg.org/multipage/#dom-media-seek>
+        // Step 12. Wait until the user agent has established whether or not the media data for
+        // the new playback position is available, and, if it is, until it has decoded enough
+        // data to play back that position.
+        if self.ready_state.get() >= ReadyState::HaveMetadata &&
+            self.ready_state.get() <= ReadyState::HaveCurrentData
+        {
+            // The player reports the seek done once it has decoded the media at the new
+            // position, so data to play it is available again (after the end of playback too,
+            // where readyState was HAVE_CURRENT_DATA).
+            self.change_ready_state(cx, ReadyState::HaveEnoughData);
+        }
+
+        self.await_seeked(cx);
+    }
+
+    /// <https://html.spec.whatwg.org/multipage/#dom-media-seek>
+    fn await_seeked(&self, cx: &JSContext) {
         // Step 13. Await a stable state.
         let task = MediaElementMicrotask::Seeked {
             elem: Dom::from_ref(self),
@@ -3338,17 +3355,19 @@ impl HTMLMediaElement {
         match *state {
             PlaybackState::Paused => {
                 media_session_playback_state = MediaSessionPlaybackState::Paused;
-                if self.ready_state.get() == ReadyState::HaveMetadata {
-                    self.change_ready_state(cx, ReadyState::HaveEnoughData);
-                }
+                self.player_has_data(cx);
             },
             PlaybackState::Playing => {
                 media_session_playback_state = MediaSessionPlaybackState::Playing;
-                if self.ready_state.get() == ReadyState::HaveMetadata {
-                    self.change_ready_state(cx, ReadyState::HaveEnoughData);
-                }
+                self.player_has_data(cx);
             },
             PlaybackState::Buffering => {
+                // The player waits for media to play from the current position: data for it is
+                // there, but not enough to advance.
+                // <https://html.spec.whatwg.org/multipage/#dom-media-have_current_data>
+                if self.ready_state.get() >= ReadyState::HaveFutureData {
+                    self.change_ready_state(cx, ReadyState::HaveCurrentData);
+                }
                 // Do not send the media session playback state change event
                 // in this case as a None_ state is expected to clean up the
                 // session.
@@ -3364,6 +3383,18 @@ impl HTMLMediaElement {
             cx,
             MediaSessionEvent::PlaybackStateChange(media_session_playback_state),
         );
+    }
+
+    /// The player paused or plays after any buffering: it has the media to play from the
+    /// current position.
+    fn player_has_data(&self, cx: &mut JSContext) {
+        let ready_state = self.ready_state.get();
+        if ready_state == ReadyState::HaveMetadata ||
+            (ready_state == ReadyState::HaveCurrentData &&
+                !self.ended_playback(LoopCondition::Included))
+        {
+            self.change_ready_state(cx, ReadyState::HaveEnoughData);
+        }
     }
 
     fn seekable(&self) -> TimeRangesContainer {
