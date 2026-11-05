@@ -157,6 +157,12 @@ struct PlayerInner {
     last_metadata: Option<Metadata>,
     cat: gstreamer::DebugCategory,
     enough_data: Arc<AtomicBool>,
+    /// Whether GstPlay is at its end of stream: set as the signals thread relays the
+    /// `end-of-stream` signal, cleared when a seek is asked for. GstPlay starts over from zero
+    /// when played from there. The media element asks for it when it resumes playback: its
+    /// own end-of-stream report waits in a task queue and can arrive after a seek or play()
+    /// that the element has done since.
+    at_end_of_media: Arc<AtomicBool>,
     /// The signal adapter's handlers that reach this state.
     handlers: Vec<glib::SignalHandlerId>,
     /// The pipeline's `source-setup` handler, which reaches this state.
@@ -347,6 +353,10 @@ impl PlayerInner {
         self.can_resume.get()
     }
 
+    pub fn at_end_of_media(&self) -> bool {
+        self.at_end_of_media.load(Ordering::SeqCst)
+    }
+
     pub fn end_of_stream(&mut self) -> Result<(), PlayerError> {
         match self.source {
             Some(ref mut source) => {
@@ -379,6 +389,7 @@ impl PlayerInner {
             return Err(PlayerError::SeekOutOfRange);
         }
 
+        self.at_end_of_media.store(false, Ordering::SeqCst);
         self.player.seek(clock_time(time));
         Ok(())
     }
@@ -765,6 +776,8 @@ impl GStreamerPlayer {
             player.set_video_track_enabled(false);
         }
 
+        let at_end_of_media = Arc::new(AtomicBool::new(false));
+
         *self.inner.borrow_mut() = Some(Arc::new(Mutex::new(PlayerInner {
             player,
             signal_adapter: signal_adapter.clone(),
@@ -782,6 +795,7 @@ impl GStreamerPlayer {
             last_metadata: None,
             cat: gstreamer::DebugCategory::get("servoplayer").unwrap(),
             enough_data: Arc::new(AtomicBool::new(false)),
+            at_end_of_media: at_end_of_media.clone(),
             handlers: Vec::new(),
             source_setup_handler: None,
             seek_lock: None,
@@ -792,6 +806,7 @@ impl GStreamerPlayer {
         let observer = self.observer.clone();
         // Handle `end-of-stream` signal.
         signal_adapter.connect_end_of_stream(move |_| {
+            at_end_of_media.store(true, Ordering::SeqCst);
             let _ = notify!(observer, PlayerEvent::EndOfStream);
         });
 
@@ -1151,6 +1166,7 @@ impl Player for GStreamerPlayer {
     inner_player_proxy!(pause, ());
     inner_player_proxy_getter!(paused, bool, DEFAULT_PAUSED);
     inner_player_proxy_getter!(can_resume, bool, DEFAULT_CAN_RESUME);
+    inner_player_proxy_getter!(at_end_of_media, bool, false);
     inner_player_proxy!(stop, ());
     inner_player_proxy!(end_of_stream, ());
     inner_player_proxy!(set_input_size, size, u64);
