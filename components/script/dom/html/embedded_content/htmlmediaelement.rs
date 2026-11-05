@@ -126,6 +126,34 @@ static MEDIA_CONTROL_JS: &str = include_str!("../../../resources/media-controls.
 /// instead of strict equality. (Unit is second)
 const SEEK_POSITION_THRESHOLD: f64 = 0.5;
 
+/// With a MediaSource attached, how far before the start of a buffered range the current
+/// playback position may be and still count as in that range. Decoding starts at the first
+/// frame of the range, whose timestamp rarely matches a seek target or a segment boundary
+/// exactly (the test media's audio and video together start 0.07 s into each segment);
+/// Chrome allows about two frame durations here.
+const MEDIA_SOURCE_RANGE_START_TOLERANCE: f64 = 0.1;
+
+/// With a MediaSource attached, a first buffered range that starts before this time is the start
+/// of the media: a current playback position anywhere before it counts as in it, and playback
+/// starts at its first frame. Media often starts a little after zero (the first frames of an
+/// MPEG-4 file at their composition offset, audio after its priming samples). This is Chrome's
+/// rule (`kSeekToStartFudgeRoom`, one second, compared with `<`); a first range starting later
+/// gets only the ordinary tolerance, as in Chrome.
+const MEDIA_SOURCE_START_OF_MEDIA: f64 = 1.0;
+
+/// With a MediaSource attached, buffered media this far ahead of the current playback position,
+/// or up to the end of the media, is "enough data to ensure uninterrupted playback"
+/// (HAVE_ENOUGH_DATA). The page fetches the media, so the user agent cannot estimate a rate;
+/// this is Firefox's estimate. Chrome reports HAVE_ENOUGH_DATA with any media buffered, which
+/// would fire canplaythrough before endOfStream() where WPT media-source expects it after.
+const MEDIA_SOURCE_ENOUGH_AHEAD: f64 = 10.0;
+
+/// With a MediaSource attached, less buffered media than this ahead of the current playback
+/// position counts as not having the next frame. Frame durations are not known here, and the
+/// player reports the position every 100 ms or so, which a smaller margin could step over
+/// before playback stops at the end of the buffered media.
+const MEDIA_SOURCE_NEXT_FRAME_AHEAD: f64 = 0.1;
+
 #[cfg_attr(crown, crown::unrooted_must_root_lint::must_root)]
 #[derive(JSTraceable, MallocSizeOf)]
 enum SrcObject {
@@ -212,6 +240,10 @@ pub(crate) struct HTMLMediaElement {
     /// may arrive before the error attribute is set (it is set from a queued task before
     /// HAVE_METADATA).
     media_source_error_reported: Cell<bool>,
+    /// Whether the player finished a seek that, with a MediaSource attached, still waits for
+    /// the new playback position to be buffered.
+    /// <https://w3c.github.io/media-source/#mediasource-seeking>
+    media_source_seek_done: Cell<bool>,
     /// <https://html.spec.whatwg.org/multipage/#dom-media-error>
     error: MutNullableDom<MediaError>,
     /// The MediaSource attached to this element, while one is.
@@ -446,6 +478,7 @@ impl HTMLMediaElement {
             fired_loadeddata_event: Cell::new(false),
             end_of_playback_reached: Cell::new(false),
             media_source_error_reported: Cell::new(false),
+            media_source_seek_done: Cell::new(false),
             error: Default::default(),
             media_source: Default::default(),
             paused: Cell::new(true),
@@ -1929,6 +1962,7 @@ impl HTMLMediaElement {
         self.fired_loadeddata_event.set(false);
         self.end_of_playback_reached.set(false);
         self.media_source_error_reported.set(false);
+        self.media_source_seek_done.set(false);
 
         // TODO Step 1. Set this element's is currently stalled to false.
 
@@ -2227,6 +2261,7 @@ impl HTMLMediaElement {
         // algorithm is already running. Abort that other instance of the algorithm without waiting
         // for the step that it is running to complete.
         self.current_seek_position.set(f64::NAN);
+        self.media_source_seek_done.set(false);
 
         // Step 4. Set the seeking IDL attribute to true.
         self.seeking.set(true);
@@ -2307,6 +2342,15 @@ impl HTMLMediaElement {
 
         self.current_seek_position.set(time);
 
+        // With a MediaSource attached: "If new playback position is not in any TimeRanges of
+        // HTMLMediaElement.buffered", readyState drops to HAVE_METADATA, and the media element
+        // waits until an appendBuffer() call raises it again. This runs in parallel with the
+        // script that seeked, so from a task.
+        // <https://w3c.github.io/media-source/#mediasource-seeking> (step 1)
+        if self.media_source.get().is_some() {
+            self.queue_media_source_ready_state_update();
+        }
+
         // Step 12. Wait until the user agent has established whether or not the media data for the
         // new playback position is available, and, if it is, until it has decoded enough data to
         // play back that position.
@@ -2336,6 +2380,9 @@ impl HTMLMediaElement {
         // Step 17. Queue a media element task given the media element to fire an event named seeked
         // at the element.
         self.queue_media_element_task_to_fire_event(atom!("seeked"));
+
+        // With a MediaSource attached, readyState waited for the seek to end.
+        self.update_media_source_ready_state(cx);
     }
 
     /// <https://html.spec.whatwg.org/multipage/#poster-frame>
@@ -3146,6 +3193,9 @@ impl HTMLMediaElement {
         // In seconds, not as a Duration: a page may set a finite duration larger than a
         // Duration holds.
         self.duration_changed(duration);
+        // The end of the media moved: playback that had ended may go on, or the media left may
+        // now all be buffered.
+        self.queue_media_source_ready_state_update();
     }
 
     fn playback_duration_changed(&self, duration: Option<Duration>) {
@@ -3298,6 +3348,10 @@ impl HTMLMediaElement {
         // > These steps are thus run as often as possible or needed.
         self.time_marches_on(cx, PlaybackPositionWasMoved::NormalPlayback);
 
+        // Playback that reaches the end of the buffered media waits for more.
+        // <https://w3c.github.io/media-source/#buffer-monitoring>
+        self.update_media_source_ready_state(cx);
+
         let media_position_state =
             MediaPositionState::new(self.duration.get(), self.playback_rate.get(), position);
         debug!(
@@ -3327,7 +3381,15 @@ impl HTMLMediaElement {
         // Step 12. Wait until the user agent has established whether or not the media data for
         // the new playback position is available, and, if it is, until it has decoded enough
         // data to play back that position.
-        if self.ready_state.get() >= ReadyState::HaveMetadata &&
+        if let Some(media_source) = self.media_source.get() {
+            // With a MediaSource, until the new playback position is buffered: an append that
+            // buffers it finishes the seek.
+            // <https://w3c.github.io/media-source/#mediasource-seeking> (step 1)
+            if self.media_source_ready_state(&media_source) < ReadyState::HaveCurrentData {
+                self.media_source_seek_done.set(true);
+                return;
+            }
+        } else if self.ready_state.get() >= ReadyState::HaveMetadata &&
             self.ready_state.get() <= ReadyState::HaveCurrentData
         {
             // The player reports the seek done once it has decoded the media at the new
@@ -3350,6 +3412,132 @@ impl HTMLMediaElement {
         ScriptThread::await_stable_state(cx, Box::new(task));
     }
 
+    /// The ready state the attached MediaSource's buffered ranges give at the current playback
+    /// position.
+    ///
+    /// <https://w3c.github.io/media-source/#buffer-monitoring>
+    fn media_source_ready_state(&self, media_source: &MediaSource) -> ReadyState {
+        let position = self.current_playback_position.get();
+        let duration = self.duration.get();
+        let ranges = media_source.buffered();
+        let range_end = ranges
+            .iter()
+            .enumerate()
+            .find(|(index, (start, end))| {
+                let start_of_media = *index == 0 && *start < MEDIA_SOURCE_START_OF_MEDIA;
+                (start_of_media || position >= start - MEDIA_SOURCE_RANGE_START_TOLERANCE) &&
+                    position <= *end
+            })
+            .map(|(_, (_, end))| *end);
+
+        // > If HTMLMediaElement.buffered does not contain a TimeRanges for the current playback
+        // > position: Set the HTMLMediaElement.readyState attribute to HAVE_METADATA.
+        let Some(range_end) = range_end else {
+            return ReadyState::HaveMetadata;
+        };
+
+        // At the end of the media there is nothing more to obtain: HAVE_CURRENT_DATA, as
+        // "when playback has ended".
+        // <https://html.spec.whatwg.org/multipage/#dom-media-have_current_data>
+        if position >= duration {
+            return ReadyState::HaveCurrentData;
+        }
+
+        // > If HTMLMediaElement.buffered contains a TimeRanges that includes the current
+        // > playback position and enough data to ensure uninterrupted playback: Set the
+        // > HTMLMediaElement.readyState attribute to HAVE_ENOUGH_DATA.
+        if range_end >= duration.min(position + MEDIA_SOURCE_ENOUGH_AHEAD) {
+            return ReadyState::HaveEnoughData;
+        }
+
+        // > If HTMLMediaElement.buffered contains a TimeRanges that includes the current
+        // > playback position and some time beyond the current playback position, then set the
+        // > HTMLMediaElement.readyState attribute to HAVE_FUTURE_DATA.
+        if range_end - position >= MEDIA_SOURCE_NEXT_FRAME_AHEAD {
+            return ReadyState::HaveFutureData;
+        }
+
+        // > If HTMLMediaElement.buffered contains a TimeRanges that ends at the current
+        // > playback position and does not have a range covering the time immediately after
+        // > the current position: Set the HTMLMediaElement.readyState attribute to
+        // > HAVE_CURRENT_DATA.
+        ReadyState::HaveCurrentData
+    }
+
+    /// Sets readyState from the attached MediaSource's buffered ranges around the current
+    /// playback position, and finishes a seek that waited for them. Run after an append or a
+    /// removal, at the end of the stream, when the duration changes, and as the current playback
+    /// position moves.
+    ///
+    /// <https://w3c.github.io/media-source/#buffer-monitoring>
+    /// <https://w3c.github.io/media-source/#sourcebuffer-coded-frame-processing> (steps 2-4)
+    /// <https://w3c.github.io/media-source/#sourcebuffer-coded-frame-removal> (step 3.5)
+    pub(crate) fn update_media_source_ready_state(&self, cx: &mut JSContext) {
+        let Some(media_source) = self.media_source.get() else {
+            return;
+        };
+        // > If the HTMLMediaElement.readyState attribute equals HAVE_NOTHING: Abort these steps.
+        // The initialization segment received algorithm raises it to HAVE_METADATA.
+        if self.ready_state.get() == ReadyState::HaveNothing {
+            return;
+        }
+        let ready_state = self.media_source_ready_state(&media_source);
+
+        if self.seeking.get() {
+            // An unbuffered new playback position drops readyState to HAVE_METADATA. Once it is
+            // buffered, a seek the player has done continues at "Await a stable state"; the
+            // seek's end raises readyState, after seeked, as in Chrome.
+            // <https://w3c.github.io/media-source/#mediasource-seeking> (steps 1 and 4)
+            if ready_state < ReadyState::HaveCurrentData {
+                self.change_ready_state(cx, ready_state);
+            } else if self.media_source_seek_done.take() {
+                self.await_seeked(cx);
+            }
+            return;
+        }
+
+        self.change_ready_state(cx, ready_state);
+
+        // A current playback position at the duration (a seek there, or a duration cut to it)
+        // has reached the end of the media resource; the player, paused at HAVE_CURRENT_DATA,
+        // will not report it.
+        // <https://html.spec.whatwg.org/multipage/#reaches-the-end>
+        if self.current_playback_position.get() >= self.duration.get() {
+            self.playback_end(cx);
+        }
+    }
+
+    /// Runs `update_media_source_ready_state` from a media element task, for the callers that
+    /// run without a script context.
+    pub(crate) fn queue_media_source_ready_state_update(&self) {
+        let this = Trusted::new(self);
+        let generation_id = self.generation_id.get();
+
+        self.owner_global()
+            .task_manager()
+            .media_element_task_source()
+            .queue(task!(media_source_ready_state_update: move |cx| {
+                let this = this.root();
+                if generation_id != this.generation_id.get() {
+                    return;
+                }
+
+                this.update_media_source_ready_state(cx);
+            }));
+    }
+
+    /// Initialization segment received, the step for a SourceBuffer whose tracks became
+    /// active: "If the HTMLMediaElement's readyState attribute is greater than
+    /// HAVE_CURRENT_DATA, then set the HTMLMediaElement's readyState attribute to
+    /// HAVE_METADATA." The appended media raises it again.
+    ///
+    /// <https://w3c.github.io/media-source/#sourcebuffer-init-segment-received>
+    pub(crate) fn media_source_tracks_activated(&self, cx: &mut JSContext) {
+        if self.ready_state.get() > ReadyState::HaveCurrentData {
+            self.change_ready_state(cx, ReadyState::HaveMetadata);
+        }
+    }
+
     fn playback_state_changed(&self, cx: &mut JSContext, state: &PlaybackState) {
         let mut media_session_playback_state = MediaSessionPlaybackState::None_;
         match *state {
@@ -3363,9 +3551,12 @@ impl HTMLMediaElement {
             },
             PlaybackState::Buffering => {
                 // The player waits for media to play from the current position: data for it is
-                // there, but not enough to advance.
+                // there, but not enough to advance. With a MediaSource the buffered ranges say so
+                // instead.
                 // <https://html.spec.whatwg.org/multipage/#dom-media-have_current_data>
-                if self.ready_state.get() >= ReadyState::HaveFutureData {
+                if self.media_source.get().is_none() &&
+                    self.ready_state.get() >= ReadyState::HaveFutureData
+                {
                     self.change_ready_state(cx, ReadyState::HaveCurrentData);
                 }
                 // Do not send the media session playback state change event
@@ -3386,8 +3577,11 @@ impl HTMLMediaElement {
     }
 
     /// The player paused or plays after any buffering: it has the media to play from the
-    /// current position.
+    /// current position. With a MediaSource the buffered ranges give readyState instead.
     fn player_has_data(&self, cx: &mut JSContext) {
+        if self.media_source.get().is_some() {
+            return;
+        }
         let ready_state = self.ready_state.get();
         if ready_state == ReadyState::HaveMetadata ||
             (ready_state == ReadyState::HaveCurrentData &&
