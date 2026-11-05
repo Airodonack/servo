@@ -560,6 +560,16 @@ impl HTMLMediaElement {
                 if let Err(error) = player.set_volume(self.volume.get()) {
                     warn!("Could not set the volume: {error:?}");
                 }
+                // Playback that resumes after the player's end of media without a seek (a
+                // MediaSource that reopened and got more media) first seeks the player to the
+                // current playback position: GStreamer's player starts over from zero otherwise.
+                // The player answers for its own state now; the end-of-stream report may still
+                // wait in the task queue, or predate a seek done since.
+                if player.at_end_of_media() &&
+                    let Err(error) = player.seek(self.current_playback_position.get())
+                {
+                    warn!("Could not seek the player to resume after its end: {error:?}");
+                }
                 if let Err(error) = player.play() {
                     error!("Could not play media: {error:?}");
                 }
