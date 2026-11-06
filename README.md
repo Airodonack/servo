@@ -1,91 +1,103 @@
-# The Servo Parallel Browser Engine Project
+> One change of the Servo fork: `review/09`, 9 of 29 in the stack.
+> Below it: [`review/08`](https://github.com/Airodonack/servo/tree/review/08). Above it: [`review/10`](https://github.com/Airodonack/servo/tree/review/10).
+> The change itself: [commit 6676e492d32282fadac29d403eb5fbf7e7144fc0](https://github.com/Airodonack/servo/commit/6676e492d32282fadac29d403eb5fbf7e7144fc0). This README sits in a commit on top of it and is not part of the pull request.
+> The whole stack: [overview README](https://github.com/Airodonack/servo/blob/vodscribe/main/README.md).
 
-Servo is a prototype web browser engine written in the
-[Rust](https://github.com/rust-lang/rust) language. It is currently developed on
-64-bit macOS, 64-bit Linux, 64-bit Windows, 64-bit OpenHarmony, and Android.
+# WebDriver returns objects with their keys in JavaScript's order
 
-Servo welcomes contribution from everyone. Check out:
+A script run through WebDriver that returned `{z:1, a:2, m:3}` came back
+with its keys in a different order on almost every call. This change keeps
+JavaScript's order from the script to the response, as Chrome's driver
+does. It was found while driving an embedding app from its end-to-end
+tests, and it changes the embedding API.
 
-- The [Servo Book](https://book.servo.org) for documentation
-- [servo.org](https://servo.org/) for news and guides
+## The problem
 
-Coordination of Servo development happens:
-- Here in the Github Issues
-- On the [Servo Zulip](https://servo.zulipchat.com/)
-- In video calls advertised in the [Servo Project](https://github.com/servo/project/issues) repo.
+A script run through WebDriver that returned `{z:1, a:2, m:3}` came back
+with its keys in a different order on almost every call: 6 orders in 10
+calls. A client comparing the JSON text failed at random. Chrome's driver
+keeps JavaScript's order.
 
-## Getting started
+The order was lost in two places: `JSValue::Object` held a `HashMap`,
+whose iteration order is random per process, and the server collected the
+object into another `HashMap` to serialise it.
 
-For more detailed build instructions, see the Servo Book under [Getting the Code] and [Building Servo].
+```mermaid
+flowchart LR
+    js["JS object<br/>z, a, m"] -->|"clone_an_object<br/>GetPropertyKeys order"| m["JSValue::Object"]
+    m -->|"IPC"| srv["webdriver_server<br/>SendableJSValue"]
+    srv -->|"serde_json::to_value"| json["response JSON"]
+```
 
-[Getting the Code]: https://book.servo.org/building/getting-the-code.html
-[Building Servo]: https://book.servo.org/building/building.html
+Every arrow kept the order except the two maps; both are now ordered.
 
-### macOS
+## The change
 
-- Download and install [Xcode](https://developer.apple.com/xcode/) and [`brew`](https://brew.sh/).
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+- [`JSValue::Object`](https://github.com/Airodonack/servo/blob/6676e492d32282fadac29d403eb5fbf7e7144fc0/components/shared/embedder/lib.rs#L1056-L1069)
+  holds an `IndexMap`, with indexmap's `serde` feature
+  ([Cargo.toml](https://github.com/Airodonack/servo/blob/6676e492d32282fadac29d403eb5fbf7e7144fc0/components/shared/embedder/Cargo.toml#L29)) so
+  the order survives IPC.
+- [`clone_an_object`](https://github.com/Airodonack/servo/blob/6676e492d32282fadac29d403eb5fbf7e7144fc0/components/script/event_loop/webdriver_handlers.rs#L564-L613)
+  fills it in the order `GetPropertyKeys` returns: integer keys ascending,
+  then string keys in creation order.
+- [`SendableJSValue::serialize`](https://github.com/Airodonack/servo/blob/6676e492d32282fadac29d403eb5fbf7e7144fc0/components/webdriver_server/lib.rs#L270-L301)
+  writes the map in order with `collect_map()`. The result goes through
+  `serde_json::to_value`, whose `Map` is sorted unless `preserve_order`
+  is on; `webdriver_server` now asks for that feature itself
+  ([Cargo.toml](https://github.com/Airodonack/servo/blob/6676e492d32282fadac29d403eb5fbf7e7144fc0/components/webdriver_server/Cargo.toml#L28)).
+  It was on before only because the script crate enables it.
+- A Servo test that took keys out with `remove()` uses `shift_remove()`.
 
-### Linux
+## Options considered
 
-- Install `curl`:
-  - Arch: `sudo pacman -S --needed curl`
-  - Debian, Ubuntu: `sudo apt install curl`
-  - Fedora: `sudo dnf install curl`
-  - Gentoo: `sudo emerge net-misc/curl`
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+| Option | What it would take | Why not chosen |
+|---|---|---|
+| **`IndexMap` in `JSValue::Object`** (this change) | A type change in the embedder crate | Chosen: order kept end to end, one map type. `indexmap` is already in the workspace. |
+| `Vec<(String, JSValue)>` | The same type change | Loses lookup by key, which embedders use. |
+| Sort the keys in the server | No API change | Deterministic, but not JavaScript's order, which Chrome returns and clients compare against. |
+| Keep `HashMap`, order only in the server | Impossible | The order is already gone once the map is built. |
 
-### Windows
+## What it costs
 
-- Download [`uv`](https://docs.astral.sh/uv/getting-started/installation/#standalone-installer), and [`rustup`](https://win.rustup.rs/)
-  - Be sure to select *Quick install via the Visual Studio Community installer*
-- Ensure that [`winget`](https://learn.microsoft.com/en-us/windows/package-manager/winget/) is available. It should be preinstalled on Windows 10 1809+ and Windows 11, otherwise can be [`manually installed`](https://github.com/microsoft/winget-cli#installing-the-client).
-- In the Visual Studio Installer, ensure the following components are installed:
-  - **Windows 10/11 SDK (anything >= 10.0.19041.0)** (`Microsoft.VisualStudio.Component.Windows{10, 11}SDK.{>=19041}`)
-  - **MSVC v143 - VS 2022 C++ x64/x86 build tools (Latest)** (`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`)
-  - **C++ ATL for latest v143 build tools (x86 & x64)** (`Microsoft.VisualStudio.Component.VC.ATL`)
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `.\mach bootstrap`
-- Build servoshell: `.\mach build`
+An API change for embedders: code that builds `JSValue::Object` from a
+`HashMap` builds it from an `IndexMap`. Insertion into an `IndexMap` costs
+about what a `HashMap` does.
 
-### Android
+## Spec
 
-- Ensure that the following environment variables are set:
-  - `ANDROID_SDK_ROOT`
-  - `ANDROID_NDK_ROOT`: `$ANDROID_SDK_ROOT/ndk/28.2.13676358/`
- `ANDROID_SDK_ROOT` can be any directory (such as `~/android-sdk`).
-  All of the Android build dependencies will be installed there.
-- Install the latest version of the [Android command-line
-  tools](https://developer.android.com/studio#command-tools) to
-  `$ANDROID_SDK_ROOT/cmdline-tools/latest`.
-- Run the following command to install the necessary components:
-  ```shell
-  sudo $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install \
-   "build-tools;36.0.0" \
-   "emulator" \
-   "ndk;29.0.14206865" \
-   "platform-tools" \
-   "platforms;android-37" \
-   "system-images;android-37;google_apis;x86_64"
-  ```
-- Follow the instructions above for the platform you are building on
+[WebDriver, clone an object](https://w3c.github.io/webdriver/#dfn-clone-an-object):
 
-### OpenHarmony
+> Otherwise A new Object. For each enumerable property in value, run the
+> following substeps: [...] set a property of result with name name and
+> value equal to cloned property result's data.
 
-- Follow the instructions above for the platform you are building on to prepare the environment.
-- Depending on the target distribution (e.g. `HarmonyOS NEXT` vs pure `OpenHarmony`) the build configuration will differ slightly.
-- Ensure that the following environment variables are set
-  - `DEVECO_SDK_HOME` (Required when targeting `HarmonyOS NEXT`)
-  - `OHOS_BASE_SDK_HOME` (Required when targeting `OpenHarmony`)
-  - `OHOS_SDK_NATIVE` (e.g. `${DEVECO_SDK_HOME}/default/openharmony/native` or `${OHOS_BASE_SDK_HOME}/${API_VERSION}/native`)
-  - `SERVO_OHOS_SIGNING_CONFIG`: Path to json file containing a valid signing configuration for the demo app.
-- Review the detailed instructions at [Building for OpenHarmony].
-- The target distribution can be modified by passing `--flavor=<default|harmonyos>` to `mach <build|package|install>`.
+The properties are visited in [[OwnPropertyKeys]] order
+([ECMAScript](https://tc39.es/ecma262/#sec-ordinaryownpropertykeys):
+integer keys ascending, then strings in creation order), and the clone is
+a new object built in that order. JSON text order is not normative, but
+the clone's order is what Chrome's driver returns.
+
+## How it was checked
+
+From the commit message (2026-11-01): a script against headless
+servoshell, ten executes per case. Before: `RESULT flat distinct=6`,
+`nested distinct=10`, `array distinct=6`, `intkeys distinct=8`,
+`RESULT pass=False`. After: `distinct=1` in every case, with the expected
+text, for example `{"1":4,"2":2,"b":1,"a":3}`; `RESULT pass=True`. WPT
+`webdriver/tests/classic/execute_script`: 10 as expected before and after
+(`objects.py` compares parsed values, so it passed before too).
+
+The restack's gate (2026-11-05) ran on this change before the day's fixups
+to lower refs were folded in (the same patch): `mach fmt` changed nothing,
+`test-tidy` passed, and `mach check` exited 0 with no warnings. At the
+stack's tip the same checks and `mach clippy` pass.
+
+Not yet done: a WPT or unit test for key order in the JSON text.
+
+## Questions a reviewer may ask
+
+- **Is the order normative?** The text order is not; the clone is built
+  in property order, and Chrome keeps it.
+- **Why does webdriver_server need `preserve_order` if script has it?**
+  Cargo unifies features in a full build, so it worked by accident; a
+  build of webdriver_server alone would sort the keys.
