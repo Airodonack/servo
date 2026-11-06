@@ -33,6 +33,26 @@ let
       url = "https://github.com/NixOS/nixpkgs/archive/6adf48f53d819a7b6e15672817fa1e78e5f4e84f.tar.gz";
     }) {};
 
+    # GStreamer 1.28.8 on this nixpkgs (glibc 2.42, which Debian 13's loader runs): no
+    # nixpkgs has 1.28.8 yet, and newer ones bring glibc 2.44. Same derivations, only the
+    # version and the source move; scoped to this shell, so nothing else rebuilds.
+    gst = gst_all_1.overrideScope (final: prev:
+      let
+        bump = name: hash: old: {
+          version = "1.28.8";
+          src = fetchurl {
+            url = "https://gstreamer.freedesktop.org/src/${name}/${name}-1.28.8.tar.xz";
+            inherit hash;
+          };
+        };
+      in {
+        gstreamer = prev.gstreamer.overrideAttrs (bump "gstreamer" "sha256-uqjoaYWtZBfMCtbnt5/yiExnecixx6YkDnEhgiyG5SQ=");
+        gst-plugins-base = prev.gst-plugins-base.overrideAttrs (bump "gst-plugins-base" "sha256-recOM4H8uwJPHyCqnt6bVlSu7TnVvXCxqY9TAV5QERc=");
+        gst-plugins-good = prev.gst-plugins-good.overrideAttrs (bump "gst-plugins-good" "sha256-p2cO2QDT0DvnRNJcGHOyOYlumoLObRf4/rxv/7rulSE=");
+        gst-plugins-bad = prev.gst-plugins-bad.overrideAttrs (bump "gst-plugins-bad" "sha256-Zw2Ii96CQlebDY6R9gzzN6p74gynwxXr+91uWpIY0QQ=");
+        gst-plugins-ugly = prev.gst-plugins-ugly.overrideAttrs (bump "gst-plugins-ugly" "sha256-Ua5TAC47vp7Q8iFQIMWiSL8O1BudmipOECuFg/7athw=");
+      });
+
     llvmPackages = llvmPackages_20;
     stdenv = llvmPackages.stdenv;
 
@@ -86,11 +106,11 @@ stdenv.mkDerivation (androidEnvironment // {
     libxcb
     libx11
 
-    gst_all_1.gstreamer
-    gst_all_1.gst-plugins-base
-    gst_all_1.gst-plugins-good
-    gst_all_1.gst-plugins-bad
-    gst_all_1.gst-plugins-ugly
+    gst.gstreamer
+    gst.gst-plugins-base
+    gst.gst-plugins-good
+    gst.gst-plugins-bad
+    gst.gst-plugins-ugly
 
     rustup
     taplo
