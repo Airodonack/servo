@@ -1,91 +1,114 @@
-# The Servo Parallel Browser Engine Project
+> One change of the Servo fork: `review/08`, 8 of 29 in the stack.
+> Below it: [`review/07`](https://github.com/Airodonack/servo/tree/review/07). Above it: [`review/09`](https://github.com/Airodonack/servo/tree/review/09).
+> The change itself: [commit bfd5c5aef553349197c1f488c853d5a4244b88d3](https://github.com/Airodonack/servo/commit/bfd5c5aef553349197c1f488c853d5a4244b88d3). This README sits in a commit on top of it and is not part of the pull request.
+> The whole stack: [overview README](https://github.com/Airodonack/servo/blob/vodscribe/main/README.md).
 
-Servo is a prototype web browser engine written in the
-[Rust](https://github.com/rust-lang/rust) language. It is currently developed on
-64-bit macOS, 64-bit Linux, 64-bit Windows, 64-bit OpenHarmony, and Android.
+# Pointer events keep fractional coordinates
 
-Servo welcomes contribution from everyone. Check out:
+`PointerEvent.clientX` and the other coordinates lost their fraction in
+Servo: every coordinate attribute of `MouseEvent` was a `long`. This change
+makes them `double`, as CSSOM View defines them, and keeps the fraction on
+pointer events as Chrome does. It is a small DOM fix, independent of the
+rest of the stack.
 
-- The [Servo Book](https://book.servo.org) for documentation
-- [servo.org](https://servo.org/) for news and guides
+## The problem
 
-Coordination of Servo development happens:
-- Here in the Github Issues
-- On the [Servo Zulip](https://servo.zulipchat.com/)
-- In video calls advertised in the [Servo Project](https://github.com/servo/project/issues) repo.
+All ten coordinate attributes of `MouseEvent` were `long`.
+`new PointerEvent("pointerdown", {clientX: 110.6}).clientX` read 110, and
+a real pointer at a fractional position read the truncated pixel: the
+input paths turned the hit test's point into integers with `to_i32()`.
+Chrome reads 110.6. A video player that maps `clientX` to a seek time
+landed a frame early.
 
-## Getting started
+## The change
 
-For more detailed build instructions, see the Servo Book under [Getting the Code] and [Building Servo].
+The IDL types become `double`, as CSSOM View defines them
+([MouseEvent.webidl](https://github.com/Airodonack/servo/blob/bfd5c5aef553349197c1f488c853d5a4244b88d3/components/script_bindings/webidls/MouseEvent.webidl#L6-L41)).
+`MouseEvent` stores its screen, client and page points as `f64`
+([fields](https://github.com/Airodonack/servo/blob/bfd5c5aef553349197c1f488c853d5a4244b88d3/components/script/dom/event/mouseevent.rs#L50-L71)),
+the input paths keep the hit test's fractional point (`cast()` instead of
+`to_i32()`, for example in
+[document_event_handler.rs](https://github.com/Airodonack/servo/blob/bfd5c5aef553349197c1f488c853d5a4244b88d3/components/script/dom/document/document_event_handler.rs#L1361-L1365)),
+and touch passes its own doubles through
+([touch.rs](https://github.com/Airodonack/servo/blob/bfd5c5aef553349197c1f488c853d5a4244b88d3/components/script/dom/touch/touch.rs#L178-L180)).
 
-[Getting the Code]: https://book.servo.org/building/getting-the-code.html
-[Building Servo]: https://book.servo.org/building/building.html
+One rule, in
+[`has_fractional_coordinates` and `coordinate`](https://github.com/Airodonack/servo/blob/bfd5c5aef553349197c1f488c853d5a4244b88d3/components/script/dom/event/mouseevent.rs#L468-L494),
+decides what every getter returns
+([getters](https://github.com/Airodonack/servo/blob/bfd5c5aef553349197c1f488c853d5a4244b88d3/components/script/dom/event/mouseevent.rs#L541-L647)):
 
-### macOS
+```mermaid
+flowchart TD
+    g["clientX, screenX, pageX, x, offsetX, ..."] --> p{"a PointerEvent?"}
+    p -->|"no: MouseEvent, WheelEvent"| floor["Math.floor of the stored value"]
+    p -->|"yes"| t{"type click, auxclick<br/>or contextmenu?"}
+    t -->|"yes"| floor
+    t -->|"no"| keep["the stored double"]
+```
 
-- Download and install [Xcode](https://developer.apple.com/xcode/) and [`brew`](https://brew.sh/).
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+So a plain `MouseEvent` still reads whole numbers, as in Chrome, but by
+flooring: `new MouseEvent("x", {clientX: -1.5}).clientX` is now -2, where
+the old `long` conversion gave -1. `initMouseEvent()` keeps its `long`
+arguments, as in Chrome
+([lines 685 to 725](https://github.com/Airodonack/servo/blob/bfd5c5aef553349197c1f488c853d5a4244b88d3/components/script/dom/event/mouseevent.rs#L685-L725)).
+The range input's slider now uses the fractional pointer position
+([range_input_type.rs](https://github.com/Airodonack/servo/blob/bfd5c5aef553349197c1f488c853d5a4244b88d3/components/script/dom/html/form_controls/input_type/range_input_type.rs#L320-L327)).
+The image map, `<input type=image>` and `<a>` with `ismap` read the
+floored click coordinates as numbers, and the dialog's light dismiss hit
+test takes the fractional client point
+([htmldialogelement.rs, line 626](https://github.com/Airodonack/servo/blob/bfd5c5aef553349197c1f488c853d5a4244b88d3/components/script/dom/html/interactive/htmldialogelement.rs#L626)).
 
-### Linux
+## Options considered
 
-- Install `curl`:
-  - Arch: `sudo pacman -S --needed curl`
-  - Debian, Ubuntu: `sudo apt install curl`
-  - Fedora: `sudo dnf install curl`
-  - Gentoo: `sudo emerge net-misc/curl`
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+| Option | What it would take | Why not chosen |
+|---|---|---|
+| **Doubles in the IDL; fractions on PointerEvent except click, auxclick, contextmenu; floor elsewhere** (this change) | One rule in every getter | Chosen: Pointer Events' rule for a browser that keeps fractions only on PointerEvent, and what Chrome 156 does (checked on the test page). |
+| Fractions on every MouseEvent, as CSSOM View reads alone | No floor at all | Pages written against Chrome expect whole numbers from mouse events. Chrome does not do it. |
+| Keep `long` | Nothing | The bug above; the fractional-coordinates WPTs stay failing. |
+| Round instead of floor on MouseEvent | `round()` | Pointer Events asks for `Math.floor` for the three types, and Chrome floors `clientX` on a MouseEvent. |
 
-### Windows
+## Spec
 
-- Download [`uv`](https://docs.astral.sh/uv/getting-started/installation/#standalone-installer), and [`rustup`](https://win.rustup.rs/)
-  - Be sure to select *Quick install via the Visual Studio Community installer*
-- Ensure that [`winget`](https://learn.microsoft.com/en-us/windows/package-manager/winget/) is available. It should be preinstalled on Windows 10 1809+ and Windows 11, otherwise can be [`manually installed`](https://github.com/microsoft/winget-cli#installing-the-client).
-- In the Visual Studio Installer, ensure the following components are installed:
-  - **Windows 10/11 SDK (anything >= 10.0.19041.0)** (`Microsoft.VisualStudio.Component.Windows{10, 11}SDK.{>=19041}`)
-  - **MSVC v143 - VS 2022 C++ x64/x86 build tools (Latest)** (`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`)
-  - **C++ ATL for latest v143 build tools (x86 & x64)** (`Microsoft.VisualStudio.Component.VC.ATL`)
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `.\mach bootstrap`
-- Build servoshell: `.\mach build`
+[CSSOM View, Extensions to the MouseEvent Interface](https://drafts.csswg.org/cssom-view/#extensions-to-the-mouseevent-interface)
+declares the ten attributes and the four `MouseEventInit` members as
+`double`. [Pointer Events, event coordinates](https://w3c.github.io/pointerevents/#event-coordinates):
 
-### Android
+> user agents that have implemented the proposed change in [CSSOM-VIEW]
+> only for PointerEvent MUST convert the various coordinate properties for
+> the click, auxclick, and contextmenu to long values (as defined in the
+> original Mouse Events) using Math.floor
 
-- Ensure that the following environment variables are set:
-  - `ANDROID_SDK_ROOT`
-  - `ANDROID_NDK_ROOT`: `$ANDROID_SDK_ROOT/ndk/28.2.13676358/`
- `ANDROID_SDK_ROOT` can be any directory (such as `~/android-sdk`).
-  All of the Android build dependencies will be installed there.
-- Install the latest version of the [Android command-line
-  tools](https://developer.android.com/studio#command-tools) to
-  `$ANDROID_SDK_ROOT/cmdline-tools/latest`.
-- Run the following command to install the necessary components:
-  ```shell
-  sudo $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install \
-   "build-tools;36.0.0" \
-   "emulator" \
-   "ndk;29.0.14206865" \
-   "platform-tools" \
-   "platforms;android-37" \
-   "system-images;android-37;google_apis;x86_64"
-  ```
-- Follow the instructions above for the platform you are building on
+## How it was checked
 
-### OpenHarmony
+From the commit message (2026-11-01):
 
-- Follow the instructions above for the platform you are building on to prepare the environment.
-- Depending on the target distribution (e.g. `HarmonyOS NEXT` vs pure `OpenHarmony`) the build configuration will differ slightly.
-- Ensure that the following environment variables are set
-  - `DEVECO_SDK_HOME` (Required when targeting `HarmonyOS NEXT`)
-  - `OHOS_BASE_SDK_HOME` (Required when targeting `OpenHarmony`)
-  - `OHOS_SDK_NATIVE` (e.g. `${DEVECO_SDK_HOME}/default/openharmony/native` or `${OHOS_BASE_SDK_HOME}/${API_VERSION}/native`)
-  - `SERVO_OHOS_SIGNING_CONFIG`: Path to json file containing a valid signing configuration for the demo app.
-- Review the detailed instructions at [Building for OpenHarmony].
-- The target distribution can be modified by passing `--flavor=<default|harmonyos>` to `mach <build|package|install>`.
+- A test page, also run in Chrome 156 headless.
+  Before: `RESULT pointer {"clientX":110,...} ok=false`, `RESULT negative
+  pointer=-1 mouse=-1 ok=false`. After: `{"clientX":110.6,"clientY":20.25,
+  "screenX":5.5,"x":110.6,"pageX":110.6} ok=true`, `negative pointer=-1.5
+  mouse=-2 ok=true`. Real input through WebDriver actions at
+  (110.6, 20.25): `pointerdown` clientX 110 before, 110.5999984741211 after
+  (the hit test's `f32`); `mousedown` and `click` 110 both times.
+- WPT for pointer events, cssom-view and uievents (47 files): 435 subtests
+  that were expected to fail now pass. `pointerevent_fractional_coordinates.html`
+  passes for mouse, pen and touch; in the `_untrusted` file every subtest
+  passes and the file stays `ERROR`, because it constructs a `DragEvent`,
+  which Servo does not have.
+
+On 2026-11-02 a build of the whole stack printed `ok=true` on every line of
+the page, including `RESULT offsets pointerdown offsetX=110.6 mousedown
+offsetX=110`.
+
+The restack's gate (2026-11-05) ran on this change before the day's fixups
+to lower refs were folded in (the same patch): `mach fmt` changed nothing,
+`test-tidy` passed, and `mach check` exited 0 with no warnings. At the
+stack's tip the same checks and `mach clippy` pass.
+
+## Questions a reviewer may ask
+
+- **Why floor plain MouseEvents?** Chrome does, and Pointer Events allows
+  a browser to keep fractions on PointerEvent only. Firefox keeps `long`
+  on MouseEvent.
+- **Does Chrome do exactly this?** Except one case: Chrome rounds
+  `offsetX` and `offsetY` on a plain MouseEvent; this change floors them
+  with the rest.
