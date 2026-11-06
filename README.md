@@ -1,91 +1,88 @@
-# The Servo Parallel Browser Engine Project
+> One change of the Servo fork: `review/11`, 11 of 29 in the stack.
+> Below it: [`review/10`](https://github.com/Airodonack/servo/tree/review/10). Above it: [`review/12`](https://github.com/Airodonack/servo/tree/review/12).
+> The change itself: [commit 17a1076bb85af1164f086871753d25c1193bb3c2](https://github.com/Airodonack/servo/commit/17a1076bb85af1164f086871753d25c1193bb3c2). This README sits in a commit on top of it and is not part of the pull request.
+> The whole stack: [overview README](https://github.com/Airodonack/servo/blob/vodscribe/main/README.md).
 
-Servo is a prototype web browser engine written in the
-[Rust](https://github.com/rust-lang/rust) language. It is currently developed on
-64-bit macOS, 64-bit Linux, 64-bit Windows, 64-bit OpenHarmony, and Android.
+# Sliders, radio buttons and checkboxes get the usual size and margins
 
-Servo welcomes contribution from everyone. Check out:
+Servo's checkboxes, radio buttons and sliders were a pixel larger than in
+other browsers and spaced differently, so rows of controls moved a page by
+6 to 12 px. This change gives them Chrome's sizes and margins, in Servo's
+user agent style sheet only. It is independent of the rest of the stack.
 
-- The [Servo Book](https://book.servo.org) for documentation
-- [servo.org](https://servo.org/) for news and guides
+## The problem
 
-Coordination of Servo development happens:
-- Here in the Github Issues
-- On the [Servo Zulip](https://servo.zulipchat.com/)
-- In video calls advertised in the [Servo Project](https://github.com/servo/project/issues) repo.
+```html
+<label><input type="checkbox"> Remember me</label>
+```
 
-## Getting started
+Before, Servo's checkbox was 14x14 with 1 px 2 px of padding and margins
+`0 2px 0 4px`. Other engines give 13x13, no padding, margins `3px 3px 3px 4px`.
+Radio buttons and range inputs differed the same way, so a form laid out
+against Chrome came out 6 to 12 px off.
 
-For more detailed build instructions, see the Servo Book under [Getting the Code] and [Building Servo].
+```mermaid
+flowchart TB
+    subgraph before["Before: checkbox"]
+        direction LR
+        b1["margin 0 2 0 4<br/>padding 1 2"] --- b2["box 14x14"]
+    end
+    subgraph after["After, as Chrome"]
+        direction LR
+        a1["margin 3 3 3 4<br/>padding 0"] --- a2["box 13x13"]
+    end
+```
 
-[Getting the Code]: https://book.servo.org/building/getting-the-code.html
-[Building Servo]: https://book.servo.org/building/building.html
+## The change
 
-### macOS
+[servo.css](https://github.com/Airodonack/servo/blob/17a1076bb85af1164f086871753d25c1193bb3c2/components/layout/stylesheets/servo.css) only:
 
-- Download and install [Xcode](https://developer.apple.com/xcode/) and [`brew`](https://brew.sh/).
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+| Control | Before | After (Chrome's values) | Lines |
+|---|---|---|---|
+| range | `margin-inline: 8px` | `margin: 2px` | [215 to 216](https://github.com/Airodonack/servo/blob/17a1076bb85af1164f086871753d25c1193bb3c2/components/layout/stylesheets/servo.css#L215-L216) |
+| checkbox, radio | padding 1px 2px | `padding: 0` | [281 to 291](https://github.com/Airodonack/servo/blob/17a1076bb85af1164f086871753d25c1193bb3c2/components/layout/stylesheets/servo.css#L281-L291) |
+| checkbox | 14x14, `margin-inline: 4px 2px` | 13x13, `margin: 3px 3px 3px 4px` | [301 to 311](https://github.com/Airodonack/servo/blob/17a1076bb85af1164f086871753d25c1193bb3c2/components/layout/stylesheets/servo.css#L301-L311) |
+| radio | 14x14, `margin-inline: 4px 2px` | 13x13, `margin: 3px 3px 0 5px`, ring and bullet 1 px smaller | [340 to 384](https://github.com/Airodonack/servo/blob/17a1076bb85af1164f086871753d25c1193bb3c2/components/layout/stylesheets/servo.css#L340-L384) |
+| text inputs | `white-space: pre` on the element | not set; the inner editor keeps it | [415 to 420](https://github.com/Airodonack/servo/blob/17a1076bb85af1164f086871753d25c1193bb3c2/components/layout/stylesheets/servo.css#L415-L420) |
 
-### Linux
+The last row changes no layout: the inner editor and placeholder still keep
+spaces. It makes `getComputedStyle(input).whiteSpace` report `normal`, as
+other engines do.
 
-- Install `curl`:
-  - Arch: `sudo pacman -S --needed curl`
-  - Debian, Ubuntu: `sudo apt install curl`
-  - Fedora: `sudo dnf install curl`
-  - Gentoo: `sudo emerge net-misc/curl`
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+## Options considered
 
-### Windows
+| Option | Why not chosen |
+|---|---|
+| **Copy Chrome's computed values** (this change) | Chosen: pages are tuned against Chrome, and the WPT has no reference for these sizes. |
+| Keep Servo's sizes | Rows of controls stay misaligned against every other engine. |
+| Draw controls natively | The long-term direction for form controls, much larger than CSS values. |
 
-- Download [`uv`](https://docs.astral.sh/uv/getting-started/installation/#standalone-installer), and [`rustup`](https://win.rustup.rs/)
-  - Be sure to select *Quick install via the Visual Studio Community installer*
-- Ensure that [`winget`](https://learn.microsoft.com/en-us/windows/package-manager/winget/) is available. It should be preinstalled on Windows 10 1809+ and Windows 11, otherwise can be [`manually installed`](https://github.com/microsoft/winget-cli#installing-the-client).
-- In the Visual Studio Installer, ensure the following components are installed:
-  - **Windows 10/11 SDK (anything >= 10.0.19041.0)** (`Microsoft.VisualStudio.Component.Windows{10, 11}SDK.{>=19041}`)
-  - **MSVC v143 - VS 2022 C++ x64/x86 build tools (Latest)** (`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`)
-  - **C++ ATL for latest v143 build tools (x86 & x64)** (`Microsoft.VisualStudio.Component.VC.ATL`)
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `.\mach bootstrap`
-- Build servoshell: `.\mach build`
+There is no spec for these sizes; HTML leaves the rendering of controls to the
+user agent.
 
-### Android
+## How it was checked
 
-- Ensure that the following environment variables are set:
-  - `ANDROID_SDK_ROOT`
-  - `ANDROID_NDK_ROOT`: `$ANDROID_SDK_ROOT/ndk/28.2.13676358/`
- `ANDROID_SDK_ROOT` can be any directory (such as `~/android-sdk`).
-  All of the Android build dependencies will be installed there.
-- Install the latest version of the [Android command-line
-  tools](https://developer.android.com/studio#command-tools) to
-  `$ANDROID_SDK_ROOT/cmdline-tools/latest`.
-- Run the following command to install the necessary components:
-  ```shell
-  sudo $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install \
-   "build-tools;36.0.0" \
-   "emulator" \
-   "ndk;29.0.14206865" \
-   "platform-tools" \
-   "platforms;android-37" \
-   "system-images;android-37;google_apis;x86_64"
-  ```
-- Follow the instructions above for the platform you are building on
+From the commit's own run: `host/form-defaults.html` in servoshell and
+headless Chrome 156; margins, padding, sizes and `white-space` of range,
+radio, checkbox, text and search inputs match Chrome.
 
-### OpenHarmony
+Rerun on 2026-11-03, Chrome side only (no Servo build here), `host/form-defaults.html`:
 
-- Follow the instructions above for the platform you are building on to prepare the environment.
-- Depending on the target distribution (e.g. `HarmonyOS NEXT` vs pure `OpenHarmony`) the build configuration will differ slightly.
-- Ensure that the following environment variables are set
-  - `DEVECO_SDK_HOME` (Required when targeting `HarmonyOS NEXT`)
-  - `OHOS_BASE_SDK_HOME` (Required when targeting `OpenHarmony`)
-  - `OHOS_SDK_NATIVE` (e.g. `${DEVECO_SDK_HOME}/default/openharmony/native` or `${OHOS_BASE_SDK_HOME}/${API_VERSION}/native`)
-  - `SERVO_OHOS_SIGNING_CONFIG`: Path to json file containing a valid signing configuration for the demo app.
-- Review the detailed instructions at [Building for OpenHarmony].
-- The target distribution can be modified by passing `--flavor=<default|harmonyos>` to `mach <build|package|install>`.
+```
+RESULT checkbox box=13x13 margin=3px 3px 3px 4px padding=0px ...
+RESULT radio box=13x13 margin=3px 3px 0px 5px padding=0px ...
+RESULT range box=129x16 margin=2px padding=0px width=129px ...
+```
+
+Checkbox and radio match the new servo.css values. The range input is 129 px
+wide in Chrome and stays 100 px in Servo; this change does not touch widths.
+
+The restack's gate (2026-11-05) ran on this change before the day's fixups
+to lower refs were folded in (the same patch): `mach fmt` changed nothing,
+`test-tidy` passed, and `mach check` exited 0 with no warnings. At the
+stack's tip the same checks and `mach clippy` pass.
+
+## Questions a reviewer may ask
+
+- **Why match Chrome's pixel sizes?** Pages are built and tested against them,
+  and the spec leaves the values to the user agent.
