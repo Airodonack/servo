@@ -1,91 +1,151 @@
-# The Servo Parallel Browser Engine Project
+> One change of the Servo fork: `review/01`, 1 of 29 in the stack.
+> Below it: the upstream base, Servo `main` at [b88af263d1](https://github.com/Airodonack/servo/commit/b88af263d11e12288ff3eca0848aaa675d6a52f0). Above it: [`review/02`](https://github.com/Airodonack/servo/tree/review/02).
+> The change itself: [commit dc538187abc1fe135141b955db869ca18a371b0c](https://github.com/Airodonack/servo/commit/dc538187abc1fe135141b955db869ca18a371b0c). This README sits in a commit on top of it and is not part of the pull request.
+> The whole stack: [overview README](https://github.com/Airodonack/servo/blob/vodscribe/main/README.md).
 
-Servo is a prototype web browser engine written in the
-[Rust](https://github.com/rust-lang/rust) language. It is currently developed on
-64-bit macOS, 64-bit Linux, 64-bit Windows, 64-bit OpenHarmony, and Android.
+# Calling play() on a playing video no longer pauses it
 
-Servo welcomes contribution from everyone. Check out:
+A page that called `play()` on a video that was already playing froze it:
+`paused` stayed `false`, but `currentTime` stopped and nothing resumed it.
+Twitch's player calls `play()` after every seek, so every seek in its embed
+froze the video. This change keeps the player playing. It is two lines in
+one function.
 
-- The [Servo Book](https://book.servo.org) for documentation
-- [servo.org](https://servo.org/) for news and guides
+## The problem
 
-Coordination of Servo development happens:
-- Here in the Github Issues
-- On the [Servo Zulip](https://servo.zulipchat.com/)
-- In video calls advertised in the [Servo Project](https://github.com/servo/project/issues) repo.
+[`update_media_state`](https://github.com/Airodonack/servo/blob/dc538187abc1fe135141b955db869ca18a371b0c/components/script/dom/html/embedded_content/htmlmediaelement.rs#L479-L511)
+keeps the backend player in step with the element. Before this change it
+read:
 
-## Getting started
+```rust
+if self.is_potentially_playing() && !is_playing {
+    // play the player
+} else if is_playing {
+    // pause the player
+}
+```
 
-For more detailed build instructions, see the Servo Book under [Getting the Code] and [Building Servo].
+The second branch runs whenever the player is playing, whatever the element
+wants. Any call made during playback pauses the player, even though the
+element is still [potentially playing](https://github.com/Airodonack/servo/blob/dc538187abc1fe135141b955db869ca18a371b0c/components/script/dom/html/embedded_content/htmlmediaelement.rs#L1802-L1812)
+and still says `paused == false`.
 
-[Getting the Code]: https://book.servo.org/building/getting-the-code.html
-[Building Servo]: https://book.servo.org/building/building.html
+`play()` reaches it through the
+[internal play steps](https://github.com/Airodonack/servo/blob/dc538187abc1fe135141b955db869ca18a371b0c/components/script/dom/html/embedded_content/htmlmediaelement.rs#L857-L940),
+which end with `update_media_state()`. A second `play()` changes nothing in
+the element, since it is not paused, so the call takes the pause branch:
 
-### macOS
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Page
+    participant El as HTMLMediaElement
+    participant P as GStreamer player
+    Page->>El: play()
+    El->>El: paused = false, potentially playing
+    El->>P: play()
+    Note over P: playing
+    Page->>El: play() again
+    El->>El: already not paused, nothing to change
+    El->>El: update_media_state()<br/>player is playing, so "else if is_playing"
+    El->>P: pause()
+    Note over El,P: element says paused = false<br/>player is paused, currentTime stops
+```
 
-- Download and install [Xcode](https://developer.apple.com/xcode/) and [`brew`](https://brew.sh/).
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+The same branch also runs from the end of
+[`change_ready_state`](https://github.com/Airodonack/servo/blob/dc538187abc1fe135141b955db869ca18a371b0c/components/script/dom/html/embedded_content/htmlmediaelement.rs#L1183),
+so a ready state change during playback, such as `HAVE_FUTURE_DATA` to
+`HAVE_ENOUGH_DATA`, takes it too.
 
-### Linux
+The condition dates from upstream commit
+[9a1d86cc88](https://github.com/Airodonack/servo/commit/9a1d86cc88af44dda6a5bd65c17db5cd40ff6428)
+(December 2025), which added the check of the player's own state so that
+`play()` and `pause()` are only sent when they change something. Before it
+the code was `if potentially playing { play } else { pause }`; the rewrite
+dropped "not potentially playing" from the pause branch.
 
-- Install `curl`:
-  - Arch: `sudo pacman -S --needed curl`
-  - Debian, Ubuntu: `sudo apt install curl`
-  - Fedora: `sudo dnf install curl`
-  - Gentoo: `sudo emerge net-misc/curl`
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+## The change
 
-### Windows
+[Lines 486 to 508](https://github.com/Airodonack/servo/blob/dc538187abc1fe135141b955db869ca18a371b0c/components/script/dom/html/embedded_content/htmlmediaelement.rs#L486-L508):
 
-- Download [`uv`](https://docs.astral.sh/uv/getting-started/installation/#standalone-installer), and [`rustup`](https://win.rustup.rs/)
-  - Be sure to select *Quick install via the Visual Studio Community installer*
-- Ensure that [`winget`](https://learn.microsoft.com/en-us/windows/package-manager/winget/) is available. It should be preinstalled on Windows 10 1809+ and Windows 11, otherwise can be [`manually installed`](https://github.com/microsoft/winget-cli#installing-the-client).
-- In the Visual Studio Installer, ensure the following components are installed:
-  - **Windows 10/11 SDK (anything >= 10.0.19041.0)** (`Microsoft.VisualStudio.Component.Windows{10, 11}SDK.{>=19041}`)
-  - **MSVC v143 - VS 2022 C++ x64/x86 build tools (Latest)** (`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`)
-  - **C++ ATL for latest v143 build tools (x86 & x64)** (`Microsoft.VisualStudio.Component.VC.ATL`)
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `.\mach bootstrap`
-- Build servoshell: `.\mach build`
+```rust
+let potentially_playing = self.is_potentially_playing();
+if potentially_playing && !is_playing {
+    // play the player
+} else if !potentially_playing &&
+    is_playing &&
+    let Some(ref player) = *self.player.borrow() &&
+    let Err(error) = player.lock().unwrap().pause()
+{
+    error!("Could not pause player: {error:?}");
+}
+```
 
-### Android
+The player is paused only when the element should not be playing. The
+four cases:
 
-- Ensure that the following environment variables are set:
-  - `ANDROID_SDK_ROOT`
-  - `ANDROID_NDK_ROOT`: `$ANDROID_SDK_ROOT/ndk/28.2.13676358/`
- `ANDROID_SDK_ROOT` can be any directory (such as `~/android-sdk`).
-  All of the Android build dependencies will be installed there.
-- Install the latest version of the [Android command-line
-  tools](https://developer.android.com/studio#command-tools) to
-  `$ANDROID_SDK_ROOT/cmdline-tools/latest`.
-- Run the following command to install the necessary components:
-  ```shell
-  sudo $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install \
-   "build-tools;36.0.0" \
-   "emulator" \
-   "ndk;29.0.14206865" \
-   "platform-tools" \
-   "platforms;android-37" \
-   "system-images;android-37;google_apis;x86_64"
-  ```
-- Follow the instructions above for the platform you are building on
+| Element potentially playing | Player playing | Before | After |
+|---|---|---|---|
+| yes | no | play | play |
+| yes | yes | **pause** | nothing |
+| no | yes | pause | pause |
+| no | no | nothing | nothing |
 
-### OpenHarmony
+The upstream commit's purpose, no redundant `play()` or `pause()`, still
+holds.
 
-- Follow the instructions above for the platform you are building on to prepare the environment.
-- Depending on the target distribution (e.g. `HarmonyOS NEXT` vs pure `OpenHarmony`) the build configuration will differ slightly.
-- Ensure that the following environment variables are set
-  - `DEVECO_SDK_HOME` (Required when targeting `HarmonyOS NEXT`)
-  - `OHOS_BASE_SDK_HOME` (Required when targeting `OpenHarmony`)
-  - `OHOS_SDK_NATIVE` (e.g. `${DEVECO_SDK_HOME}/default/openharmony/native` or `${OHOS_BASE_SDK_HOME}/${API_VERSION}/native`)
-  - `SERVO_OHOS_SIGNING_CONFIG`: Path to json file containing a valid signing configuration for the demo app.
-- Review the detailed instructions at [Building for OpenHarmony].
-- The target distribution can be modified by passing `--flavor=<default|harmonyos>` to `mach <build|package|install>`.
+## Options considered
+
+| Option | Why not chosen |
+|---|---|
+| **Add "not potentially playing" to the pause branch** (this change) | Chosen: restores the old meaning and keeps the upstream optimisation. |
+| Return early from `play()` when the element is already playing | Only covers `play()`. The ready state path keeps the bug. |
+| Go back to `if potentially playing { play } else { pause }` | Undoes the upstream commit, which avoided resending the playback rate and volume on every call. |
+
+## Spec
+
+[HTML, internal play steps](https://html.spec.whatwg.org/multipage/media.html#internal-play-steps),
+step 4, for an element that is not paused:
+
+> Otherwise, if the media element's readyState attribute has the value
+> HAVE_FUTURE_DATA or HAVE_ENOUGH_DATA, take pending play promises and queue a
+> media element task given the media element to resolve pending play promises
+> with the result.
+
+followed by the note "The media element is already playing." Nothing else
+happens. And from
+[playing the media resource](https://html.spec.whatwg.org/multipage/media.html#playing-the-media-resource):
+
+> When a media element is potentially playing and its Document is a fully
+> active Document, its current playback position must increase monotonically
+
+## How it was checked
+
+From the runs of `host/play_twice.html` (a progressive MP4, `play()` again
+two seconds in, `currentTime` printed every second) on 2026-10-22, with the
+fork then on the 0.7.0 base:
+
+| Build | Before second `play()` | 1 s, 2 s, 3 s, 4 s after |
+|---|---|---|
+| without the fix | 1.36 | 1.80, 1.80, 1.80, 1.80 |
+| with the fix | 1.34 | 2.21, 3.07, 4.03, 4.92 |
+
+The same page on the rebased stack (2026-11-01, `rebase-rebase-play_twice`)
+keeps advancing: 2.46, 3.46, 4.47, 5.48. In the Twitch embed, arrow-key seeks
+forward and back play on. At this commit, the restack's gate
+(2026-11-05): `mach fmt` changed nothing, `test-tidy` passed, and `mach check`
+exited 0 with no warnings.
+
+Not yet done: a run without the fix on the current upstream base, and a
+web-platform-test (`play()` twice, then `currentTime` advances). Nothing in
+the existing suites covers it.
+
+## Questions a reviewer may ask
+
+- **Why did nobody see this upstream?** Most pages call `play()` once. The
+  bug needs a second call, or a ready state change, while the player plays.
+- **Does the ready state path matter in practice?** It runs on every ready
+  state change that reaches the end of `change_ready_state`. Not observed on
+  its own in these runs.
+- **Could the pause branch ever be needed while potentially playing?** No.
+  While the element is potentially playing its position must advance.
