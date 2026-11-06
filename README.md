@@ -1,91 +1,147 @@
-# The Servo Parallel Browser Engine Project
+> One change of the Servo fork: `review/03`, 3 of 29 in the stack.
+> Below it: [`review/02`](https://github.com/Airodonack/servo/tree/review/02). Above it: [`review/04`](https://github.com/Airodonack/servo/tree/review/04).
+> The change itself: [commit 5372aaf8133afe6ce48b3d5aff30dab6cbadca3c](https://github.com/Airodonack/servo/commit/5372aaf8133afe6ce48b3d5aff30dab6cbadca3c). This README sits in a commit on top of it and is not part of the pull request.
+> The whole stack: [overview README](https://github.com/Airodonack/servo/blob/vodscribe/main/README.md).
 
-Servo is a prototype web browser engine written in the
-[Rust](https://github.com/rust-lang/rust) language. It is currently developed on
-64-bit macOS, 64-bit Linux, 64-bit Windows, 64-bit OpenHarmony, and Android.
+# Seeks in the GStreamer player land on the requested time
 
-Servo welcomes contribution from everyone. Check out:
+Setting `currentTime` on some videos left the element stuck: `seeking`
+stayed `true`, `seeked` never fired, and playback did not resume. This
+change makes the GStreamer player seek to the exact time asked for, which
+ends the seek normally.
 
-- The [Servo Book](https://book.servo.org) for documentation
-- [servo.org](https://servo.org/) for news and guides
+It is six lines in one file, but it changes every seek the GStreamer backend
+makes, so it is worth understanding before sending.
 
-Coordination of Servo development happens:
-- Here in the Github Issues
-- On the [Servo Zulip](https://servo.zulipchat.com/)
-- In video calls advertised in the [Servo Project](https://github.com/servo/project/issues) repo.
+## The problem
 
-## Getting started
+Two layers disagree about where a seek landed.
 
-For more detailed build instructions, see the Servo Book under [Getting the Code] and [Building Servo].
+- **GStreamer's player (GstPlay)** sends a seek without the `ACCURATE` flag
+  unless told otherwise. A demuxer may then jump to any nearby sync point (a
+  keyframe) and report that position. A file with an index, such as MP4, lands
+  exactly anyway. A file without one, such as MPEG-TS, lands up to a
+  keyframe interval early.
+- **The media element** only accepts a "seek done" whose position is within
+  0.5 s of what it asked for
+  ([`SEEK_POSITION_THRESHOLD`](https://github.com/Airodonack/servo/blob/5372aaf8133afe6ce48b3d5aff30dab6cbadca3c/components/script/dom/html/embedded_content/htmlmediaelement.rs#L122-L125),
+  checked in
+  [`playback_seek_done`](https://github.com/Airodonack/servo/blob/5372aaf8133afe6ce48b3d5aff30dab6cbadca3c/components/script/dom/html/embedded_content/htmlmediaelement.rs#L2954-L2970)).
+  The check exists so that a late "seek done" from an earlier, abandoned seek
+  is not mistaken for the current one.
 
-[Getting the Code]: https://book.servo.org/building/getting-the-code.html
-[Building Servo]: https://book.servo.org/building/building.html
+When the demuxer lands more than 0.5 s away, the element decides the report
+belongs to some other seek and ignores it. No other report comes, so the
+seek never ends.
 
-### macOS
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Page
+    participant El as HTMLMediaElement
+    participant GP as GstPlay
+    participant D as tsdemux
+    Page->>El: currentTime = 7.7
+    El->>El: seeking = true, target 7.7
+    El->>GP: seek(7.7 s)
+    GP->>D: seek event, no ACCURATE flag
+    D-->>GP: landed near the keyframe before 7.7
+    GP-->>El: SeekDone(5.97)
+    El->>El: |5.97 - 7.7| = 1.73 > 0.5
+    Note over El: treated as another seek's report and ignored.<br/>seeking stays true, seeked never fires.
+```
 
-- Download and install [Xcode](https://developer.apple.com/xcode/) and [`brew`](https://brew.sh/).
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+## The change
 
-### Linux
+Where the backend builds GstPlay's configuration
+([player.rs, lines 547 to 558](https://github.com/Airodonack/servo/blob/5372aaf8133afe6ce48b3d5aff30dab6cbadca3c/components/media/backends/gstreamer/player.rs#L547-L558)),
+one call turns on accurate seeking:
 
-- Install `curl`:
-  - Arch: `sudo pacman -S --needed curl`
-  - Debian, Ubuntu: `sudo apt install curl`
-  - Fedora: `sudo dnf install curl`
-  - Gentoo: `sudo emerge net-misc/curl`
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+```rust
+config.set_position_update_interval(500u32);
+config.set_seek_accurate(true); // new
+```
 
-### Windows
+With it, GstPlay adds the `ACCURATE` flag to every seek. The demuxer still
+starts at a keyframe, but the pipeline decodes and drops the frames up to the
+target before it reports the seek done. The report then matches the request
+and the element finishes the seek.
 
-- Download [`uv`](https://docs.astral.sh/uv/getting-started/installation/#standalone-installer), and [`rustup`](https://win.rustup.rs/)
-  - Be sure to select *Quick install via the Visual Studio Community installer*
-- Ensure that [`winget`](https://learn.microsoft.com/en-us/windows/package-manager/winget/) is available. It should be preinstalled on Windows 10 1809+ and Windows 11, otherwise can be [`manually installed`](https://github.com/microsoft/winget-cli#installing-the-client).
-- In the Visual Studio Installer, ensure the following components are installed:
-  - **Windows 10/11 SDK (anything >= 10.0.19041.0)** (`Microsoft.VisualStudio.Component.Windows{10, 11}SDK.{>=19041}`)
-  - **MSVC v143 - VS 2022 C++ x64/x86 build tools (Latest)** (`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`)
-  - **C++ ATL for latest v143 build tools (x86 & x64)** (`Microsoft.VisualStudio.Component.VC.ATL`)
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `.\mach bootstrap`
-- Build servoshell: `.\mach build`
+```mermaid
+flowchart LR
+    subgraph without["Without ACCURATE"]
+        A1["seek to 7.7"] --> A2["keyframe near 6.0"] --> A3["reports 5.97"] --> A4["element ignores it"]
+    end
+    subgraph with["With ACCURATE"]
+        B1["seek to 7.7"] --> B2["keyframe near 6.0"] --> B3["decode and drop<br/>up to 7.7"] --> B4["reports 7.7"] --> B5["seeked fires"]
+    end
+```
 
-### Android
+There is one GstPlay configuration in the backend, so this covers plain
+`src` playback and, later in the stack, Media Source playback.
 
-- Ensure that the following environment variables are set:
-  - `ANDROID_SDK_ROOT`
-  - `ANDROID_NDK_ROOT`: `$ANDROID_SDK_ROOT/ndk/28.2.13676358/`
- `ANDROID_SDK_ROOT` can be any directory (such as `~/android-sdk`).
-  All of the Android build dependencies will be installed there.
-- Install the latest version of the [Android command-line
-  tools](https://developer.android.com/studio#command-tools) to
-  `$ANDROID_SDK_ROOT/cmdline-tools/latest`.
-- Run the following command to install the necessary components:
-  ```shell
-  sudo $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install \
-   "build-tools;36.0.0" \
-   "emulator" \
-   "ndk;29.0.14206865" \
-   "platform-tools" \
-   "platforms;android-37" \
-   "system-images;android-37;google_apis;x86_64"
-  ```
-- Follow the instructions above for the platform you are building on
+## Options considered
 
-### OpenHarmony
+| Option | What it would take | Why not chosen |
+|---|---|---|
+| **Accurate seeks for every player** (this change) | One config line | Chosen: smallest change, `currentTime` ends where the page asked, as the spec requires for an ordinary seek. Costs time on files without an index (below). |
+| Widen the element's 0.5 s threshold | Change one constant | The gap is as large as the keyframe interval: 2 s here, often 4 to 10 s in recorded streams. Any fixed value fails on some file, and a wide one lets an old seek's report end a new seek. The picture would also show a frame seconds away from `currentTime`. |
+| Accept whatever position the backend reports and move `currentTime` there | Element change in `playback_seek_done` | The spec only allows an approximate position for `fastSeek()`. A page that seeks with `currentTime` expects to land there. Captions, transcripts and frame stepping depend on it. |
+| Accurate for `currentTime`, keyframe-only for `fastSeek()` | Per-seek flags | GstPlay only accepts a new configuration while stopped ([gstplay.c, lines 4673 to 4702](https://github.com/Airodonack/gstreamer/blob/1.28.6/subprojects/gst-plugins-bad/gst-libs/gst/play/gstplay.c#L4673-L4702)), so per-seek flags mean sending seek events to the pipeline past GstPlay. Worth doing later, for `fastSeek()` only. Today `fastSeek()` is accurate too, which the spec allows. |
+| Fix the demuxer | Change in GStreamer | Landing on a sync point is the demuxer's documented behaviour without the flag. `ACCURATE` is the standard way to ask for more. |
 
-- Follow the instructions above for the platform you are building on to prepare the environment.
-- Depending on the target distribution (e.g. `HarmonyOS NEXT` vs pure `OpenHarmony`) the build configuration will differ slightly.
-- Ensure that the following environment variables are set
-  - `DEVECO_SDK_HOME` (Required when targeting `HarmonyOS NEXT`)
-  - `OHOS_BASE_SDK_HOME` (Required when targeting `OpenHarmony`)
-  - `OHOS_SDK_NATIVE` (e.g. `${DEVECO_SDK_HOME}/default/openharmony/native` or `${OHOS_BASE_SDK_HOME}/${API_VERSION}/native`)
-  - `SERVO_OHOS_SIGNING_CONFIG`: Path to json file containing a valid signing configuration for the demo app.
-- Review the detailed instructions at [Building for OpenHarmony].
-- The target distribution can be modified by passing `--flavor=<default|harmonyos>` to `mach <build|package|install>`.
+## What it costs
+
+Measured with GstPlay over playbin3, set up as Servo's backend sets it up
+(GStreamer 1.28.7, the same 90 s clip as MPEG-TS and MP4, 2 s keyframe
+spacing, paused seeks to 3.0, 5.3, 7.7, 11.1 and 13.9 s):
+
+| File | Flag | Reported position minus target | Time to "seek done" |
+|---|---|---|---|
+| MPEG-TS | off | 1.70 to 2.02 s early | 36 to 66 ms |
+| MPEG-TS | on | 0.000 s | 285 to 956 ms |
+| MP4 | off | 0.000 s | 142 to 232 ms |
+| MP4 | on | 0.000 s | 157 to 247 ms |
+
+MP4 is unchanged in practice: about 15 ms more per seek. MPEG-TS seeks become
+correct and take up to a second, because up to one keyframe interval is
+decoded and dropped. That is the price of landing on the requested frame.
+
+## Spec
+
+[HTML, the seek algorithm](https://html.spec.whatwg.org/multipage/media.html#dom-media-seek),
+step 9:
+
+> If the approximate-for-speed flag is set, adjust the new playback position
+> to a value that will allow for playback to resume promptly.
+
+Only `fastSeek()` sets that flag. An ordinary seek moves the playback position
+to the requested time (step 11) and waits until the media data for that
+position is available (step 12).
+
+## How it was checked
+
+- The table above, from a GstPlay probe run with and without the flag on
+  both files. Without the flag, the reported position never came within the
+  0.5 s threshold on MPEG-TS. With it, every seek reported the exact target,
+  and the first frame after the seek was the target frame.
+- A seek while playing, to 9.5 s on MPEG-TS: reported 7.50 s without the flag
+  and 9.50 s with it.
+
+At this commit, the restack's gate (2026-11-05): `mach fmt` changed nothing,
+`test-tidy` passed, and `mach check` exited 0 with no warnings.
+
+Not yet done: an in-browser test page that plays the MPEG-TS clip in
+servoshell, seeks, and waits for `seeked`, with and without this commit.
+
+## Questions a reviewer may ask
+
+- **Why not only for formats that need it?** The backend doesn't know which
+  demuxer the pipeline picked when it builds the configuration. On files with
+  an index the flag costs almost nothing.
+- **Does this slow down scrubbing?** On files without an index, yes, by up to
+  a keyframe interval of decoding per seek. Pages that want speed over
+  accuracy can call `fastSeek()`, which the per-seek option above would make
+  fast.
+- **Is the 0.5 s threshold still needed?** Yes. It still tells the current
+  seek's report apart from a late report of an abandoned one.
