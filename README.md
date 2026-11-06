@@ -1,91 +1,84 @@
-# The Servo Parallel Browser Engine Project
+> One change of the Servo fork: `review/23`, 23 of 29 in the stack.
+> Below it: [`review/22`](https://github.com/Airodonack/servo/tree/review/22). Above it: [`review/24`](https://github.com/Airodonack/servo/tree/review/24).
+> The change itself: [commit 33b1e92a17ff2df437eea1d489961b0d237d858e](https://github.com/Airodonack/servo/commit/33b1e92a17ff2df437eea1d489961b0d237d858e). This README sits in a commit on top of it and is not part of the pull request.
+> The whole stack: [overview README](https://github.com/Airodonack/servo/blob/vodscribe/main/README.md).
 
-Servo is a prototype web browser engine written in the
-[Rust](https://github.com/rust-lang/rust) language. It is currently developed on
-64-bit macOS, 64-bit Linux, 64-bit Windows, 64-bit OpenHarmony, and Android.
+# Update the Media Source test expectations
 
-Servo welcomes contribution from everyone. Check out:
+Nothing changes for a page. The `media-source` web-platform-tests now run with
+the MSE pref on, as CI should run them, and their expectations are those of the
+build Servo's CI makes, which has no MSE backend.
 
-- The [Servo Book](https://book.servo.org) for documentation
-- [servo.org](https://servo.org/) for news and guides
+## The problem
 
-Coordination of Servo development happens:
-- Here in the Github Issues
-- On the [Servo Zulip](https://servo.zulipchat.com/)
-- In video calls advertised in the [Servo Project](https://github.com/servo/project/issues) repo.
+Nothing turned the pref on for this directory. A run without
+`--pref dom_media_source_enabled=true` on the command line saw `MediaSource`
+undefined, so none of the MSE code of
+[`review/20`](https://github.com/Airodonack/servo/tree/review/20) and
+[`review/22`](https://github.com/Airodonack/servo/tree/review/22) ran in CI.
 
-## Getting started
+Turning the pref on raises the next question: what does CI see? Servo's CI runs
+WPT on Ubuntu 22.04, whose GStreamer 1.20 has no mselib, so `mach` builds
+without `media-gstreamer-mse`. Since `review/20`, a build without an MSE
+backend does not expose `MediaSource`. CI therefore sees what
+[`review/17`](https://github.com/Airodonack/servo/tree/review/17) recorded.
 
-For more detailed build instructions, see the Servo Book under [Getting the Code] and [Building Servo].
+## The change
 
-[Getting the Code]: https://book.servo.org/building/getting-the-code.html
-[Building Servo]: https://book.servo.org/building/building.html
+One line,
+[`tests/wpt/meta/media-source/__dir__.ini`](https://github.com/Airodonack/servo/blob/33b1e92a17ff2df437eea1d489961b0d237d858e/tests/wpt/meta/media-source/__dir__.ini):
 
-### macOS
+```ini
+prefs: [dom_media_source_enabled: true]
+```
 
-- Download and install [Xcode](https://developer.apple.com/xcode/) and [`brew`](https://brew.sh/).
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+as other pref-gated directories do, for example
+[`WebCryptoAPI/__dir__.ini`](https://github.com/Airodonack/servo/blob/33b1e92a17ff2df437eea1d489961b0d237d858e/tests/wpt/meta/WebCryptoAPI/__dir__.ini).
 
-### Linux
+The expectation files were recorded afresh, every old file removed first,
+from three runs of a build like CI's: `mach`'s mselib check turned off for one
+build, run on Debian 13's GStreamer packages. `mach update-wpt` wrote
+`review/17`'s files again, so none changes. It wrote
+`idlharness.any.js.ini` with its worker and window sections swapped; the
+entries are the same, and `review/17`'s file is kept.
 
-- Install `curl`:
-  - Arch: `sudo pacman -S --needed curl`
-  - Debian, Ubuntu: `sudo apt install curl`
-  - Fedora: `sudo dnf install curl`
-  - Gentoo: `sudo emerge net-misc/curl`
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+```mermaid
+flowchart LR
+    I["__dir__.ini<br/>pref on"] --> R["mach test-wpt media-source"]
+    R --> Q{{"backend supports MSE?"}}
+    Q -- "CI: GStreamer 1.20, no mselib" --> N["MediaSource not exposed<br/>review/17's expectations"]
+    Q -- "mselib and the GStreamer series" --> Y["MSE runs<br/>about 426 of 726 subtests pass<br/>not recorded"]
+```
 
-### Windows
+| Run | Tests | Subtests |
+|---|---|---|
+| Each of three recording runs, no mselib | 88: 78 OK, 10 ERROR | 599: 23 PASS, 576 FAIL |
+| Two runs with mselib and the GStreamer series | 88: 81-82 OK, 4 ERROR, 2-3 TIMEOUT | 726: 426-427 PASS, 294 FAIL, 4-5 TIMEOUT, 1 PRECONDITION_FAILED |
 
-- Download [`uv`](https://docs.astral.sh/uv/getting-started/installation/#standalone-installer), and [`rustup`](https://win.rustup.rs/)
-  - Be sure to select *Quick install via the Visual Studio Community installer*
-- Ensure that [`winget`](https://learn.microsoft.com/en-us/windows/package-manager/winget/) is available. It should be preinstalled on Windows 10 1809+ and Windows 11, otherwise can be [`manually installed`](https://github.com/microsoft/winget-cli#installing-the-client).
-- In the Visual Studio Installer, ensure the following components are installed:
-  - **Windows 10/11 SDK (anything >= 10.0.19041.0)** (`Microsoft.VisualStudio.Component.Windows{10, 11}SDK.{>=19041}`)
-  - **MSVC v143 - VS 2022 C++ x64/x86 build tools (Latest)** (`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`)
-  - **C++ ATL for latest v143 build tools (x86 & x64)** (`Microsoft.VisualStudio.Component.VC.ATL`)
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `.\mach bootstrap`
-- Build servoshell: `.\mach build`
+No result differed between the three recording runs, so nothing is marked
+intermittent.
 
-### Android
+## Options considered
 
-- Ensure that the following environment variables are set:
-  - `ANDROID_SDK_ROOT`
-  - `ANDROID_NDK_ROOT`: `$ANDROID_SDK_ROOT/ndk/28.2.13676358/`
- `ANDROID_SDK_ROOT` can be any directory (such as `~/android-sdk`).
-  All of the Android build dependencies will be installed there.
-- Install the latest version of the [Android command-line
-  tools](https://developer.android.com/studio#command-tools) to
-  `$ANDROID_SDK_ROOT/cmdline-tools/latest`.
-- Run the following command to install the necessary components:
-  ```shell
-  sudo $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install \
-   "build-tools;36.0.0" \
-   "emulator" \
-   "ndk;29.0.14206865" \
-   "platform-tools" \
-   "platforms;android-37" \
-   "system-images;android-37;google_apis;x86_64"
-  ```
-- Follow the instructions above for the platform you are building on
+| Option | Why not chosen |
+|---|---|
+| **Pref on, expectations of CI's build** (this change) | Chosen: CI runs what a page sees on that build, and the results do not depend on machine speed. |
+| Expectations of the MSE build, as this commit first recorded | No CI runner has mselib with the GStreamer series, so every run there would be unexpected. Nine playback tests also flipped with machine speed. |
+| No `__dir__.ini`, the pref passed by hand | CI does not pass it, so the files would describe a run nobody makes. |
+| A CI job with a newer GStreamer | Not this fork's to decide; a question for the maintainers. |
 
-### OpenHarmony
+## How it was checked
 
-- Follow the instructions above for the platform you are building on to prepare the environment.
-- Depending on the target distribution (e.g. `HarmonyOS NEXT` vs pure `OpenHarmony`) the build configuration will differ slightly.
-- Ensure that the following environment variables are set
-  - `DEVECO_SDK_HOME` (Required when targeting `HarmonyOS NEXT`)
-  - `OHOS_BASE_SDK_HOME` (Required when targeting `OpenHarmony`)
-  - `OHOS_SDK_NATIVE` (e.g. `${DEVECO_SDK_HOME}/default/openharmony/native` or `${OHOS_BASE_SDK_HOME}/${API_VERSION}/native`)
-  - `SERVO_OHOS_SIGNING_CONFIG`: Path to json file containing a valid signing configuration for the demo app.
-- Review the detailed instructions at [Building for OpenHarmony].
-- The target distribution can be modified by passing `--flavor=<default|harmonyos>` to `mach <build|package|install>`.
+- **2026-11-05:** three more runs of the build without mselib against these
+  files: "Ran 88 tests ... 88 ran as expected" each time.
+- Two runs of the build with mselib and the GStreamer series against these
+  files: 24 as expected, 5-6 unexpectedly OK, 2-3 unexpected timeouts, 62
+  with unexpected subtest results; no expectation recorded from them.
+
+## Questions a reviewer may ask
+
+- **So the MSE code is not tested in CI?** Not by these files, until a CI
+  runner has GStreamer 1.24 or newer with mselib. The MSE results of the
+  GStreamer series build are in the fork's notes, not here.
+- **Why keep this commit, if it adds one line?** It is the line that makes CI
+  run the directory as a page would; without it the pref is off.
