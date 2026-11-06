@@ -1,91 +1,97 @@
-# The Servo Parallel Browser Engine Project
+> One change of the Servo fork: `review/14`, 14 of 29 in the stack.
+> Below it: [`review/13`](https://github.com/Airodonack/servo/tree/review/13). Above it: [`review/15`](https://github.com/Airodonack/servo/tree/review/15).
+> The change itself: [commit 1b6724823a584a2d7dfed94cac4b5364a32d25f9](https://github.com/Airodonack/servo/commit/1b6724823a584a2d7dfed94cac4b5364a32d25f9). This README sits in a commit on top of it and is not part of the pull request.
+> The whole stack: [overview README](https://github.com/Airodonack/servo/blob/vodscribe/main/README.md).
 
-Servo is a prototype web browser engine written in the
-[Rust](https://github.com/rust-lang/rust) language. It is currently developed on
-64-bit macOS, 64-bit Linux, 64-bit Windows, 64-bit OpenHarmony, and Android.
+# Text that overflows a clipped box can end in an ellipsis
 
-Servo welcomes contribution from everyone. Check out:
+`text-overflow: ellipsis` did nothing in Servo: a clipped title was cut
+mid-letter with no "…". Stylo compiled the property for Servo behind a
+preference that was off. This change turns it on and implements the
+ellipsis in line layout. It is independent of the rest of the stack.
 
-- The [Servo Book](https://book.servo.org) for documentation
-- [servo.org](https://servo.org/) for news and guides
+## Suggested reading order
 
-Coordination of Servo development happens:
-- Here in the Github Issues
-- On the [Servo Zulip](https://servo.zulipchat.com/)
-- In video calls advertised in the [Servo Project](https://github.com/servo/project/issues) repo.
+| Step | File | What to look for |
+|---|---|---|
+| 1 | [flow/inline/mod.rs, lines 1441 to 1536](https://github.com/Airodonack/servo/blob/1b6724823a584a2d7dfed94cac4b5364a32d25f9/components/layout/flow/inline/mod.rs#L1441-L1536) | when a line gets an ellipsis |
+| 2 | [flow/inline/line.rs, lines 732 to 783](https://github.com/Airodonack/servo/blob/1b6724823a584a2d7dfed94cac4b5364a32d25f9/components/layout/flow/inline/line.rs#L732-L783) | how the text is cut to make room |
 
-## Getting started
+## The problem
 
-For more detailed build instructions, see the Servo Book under [Getting the Code] and [Building Servo].
+```css
+.title { width: 100px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+```
 
-[Getting the Code]: https://book.servo.org/building/getting-the-code.html
-[Building Servo]: https://book.servo.org/building/building.html
+The title was cut mid-letter with no "…": stylo compiled `text-overflow` for
+Servo behind a preference that was off, so the declaration was dropped.
 
-### macOS
+```mermaid
+flowchart LR
+    subgraph before["Before"]
+        A["|WWWWWWW| cut at the box edge"]
+    end
+    subgraph after["After"]
+        B["|WWWWW…| ellipsis inside the box"]
+    end
+```
 
-- Download and install [Xcode](https://developer.apple.com/xcode/) and [`brew`](https://brew.sh/).
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+## The change
 
-### Linux
+- [prefs.rs, lines 43 to 47](https://github.com/Airodonack/servo/blob/1b6724823a584a2d7dfed94cac4b5364a32d25f9/components/config/prefs.rs#L43-L47) turns
+  stylo's `layout.css.text-overflow.enabled` on, before the early return that
+  skips unchanged preferences (they are unchanged at startup).
+- [`ellipsis_for_current_line`](https://github.com/Airodonack/servo/blob/1b6724823a584a2d7dfed94cac4b5364a32d25f9/components/layout/flow/inline/mod.rs#L1441-L1536)
+  decides per line: the block container (also through an anonymous block) has
+  `overflow` other than `visible` in the inline axis, `text-overflow` at the
+  end side is `ellipsis` or a string, and the content ends past the line box.
+  Hanging white space does not count. The ellipsis is shaped with the block's
+  first font. Single-line text inputs are left alone.
+- [`truncate_text_run_for_ellipsis`](https://github.com/Airodonack/servo/blob/1b6724823a584a2d7dfed94cac4b5364a32d25f9/components/layout/flow/inline/line.rs#L732-L783)
+  keeps the glyph clusters that fit before the ellipsis, using
+  [`ShapedTextSlice::leading_part_fitting_in`](https://github.com/Airodonack/servo/blob/1b6724823a584a2d7dfed94cac4b5364a32d25f9/components/fonts/glyph.rs#L747-L818),
+  which also handles right-to-left runs. Atomic inlines that do not fit are
+  hidden. The ellipsis is placed right after what remains
+  ([line.rs, lines 451 to 458](https://github.com/Airodonack/servo/blob/1b6724823a584a2d7dfed94cac4b5364a32d25f9/components/layout/flow/inline/line.rs#L451-L458)).
+- Hidden text keeps a fragment with no glyphs, so positions and `scrollWidth`
+  do not change.
 
-- Install `curl`:
-  - Arch: `sudo pacman -S --needed curl`
-  - Debian, Ubuntu: `sudo apt install curl`
-  - Fedora: `sudo dnf install curl`
-  - Gentoo: `sudo emerge net-misc/curl`
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+## Options considered
 
-### Windows
+| Option | Why not chosen |
+|---|---|
+| **Cut at line layout, after line breaking** (this change) | Chosen: the line's content is final there, and fragments keep their positions, so scrolling still reveals the hidden text. |
+| Draw the ellipsis over the content at paint time | The spec says to hide characters so the ellipsis sits right after the remaining content, not over a half glyph. |
+| Leave the preference off | The property is common and every other engine ships it. |
 
-- Download [`uv`](https://docs.astral.sh/uv/getting-started/installation/#standalone-installer), and [`rustup`](https://win.rustup.rs/)
-  - Be sure to select *Quick install via the Visual Studio Community installer*
-- Ensure that [`winget`](https://learn.microsoft.com/en-us/windows/package-manager/winget/) is available. It should be preinstalled on Windows 10 1809+ and Windows 11, otherwise can be [`manually installed`](https://github.com/microsoft/winget-cli#installing-the-client).
-- In the Visual Studio Installer, ensure the following components are installed:
-  - **Windows 10/11 SDK (anything >= 10.0.19041.0)** (`Microsoft.VisualStudio.Component.Windows{10, 11}SDK.{>=19041}`)
-  - **MSVC v143 - VS 2022 C++ x64/x86 build tools (Latest)** (`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`)
-  - **C++ ATL for latest v143 build tools (x86 & x64)** (`Microsoft.VisualStudio.Component.VC.ATL`)
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `.\mach bootstrap`
-- Build servoshell: `.\mach build`
+## Spec
 
-### Android
+[CSS Overflow 3, text-overflow](https://drafts.csswg.org/css-overflow-3/#text-overflow):
 
-- Ensure that the following environment variables are set:
-  - `ANDROID_SDK_ROOT`
-  - `ANDROID_NDK_ROOT`: `$ANDROID_SDK_ROOT/ndk/28.2.13676358/`
- `ANDROID_SDK_ROOT` can be any directory (such as `~/android-sdk`).
-  All of the Android build dependencies will be installed there.
-- Install the latest version of the [Android command-line
-  tools](https://developer.android.com/studio#command-tools) to
-  `$ANDROID_SDK_ROOT/cmdline-tools/latest`.
-- Run the following command to install the necessary components:
-  ```shell
-  sudo $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install \
-   "build-tools;36.0.0" \
-   "emulator" \
-   "ndk;29.0.14206865" \
-   "platform-tools" \
-   "platforms;android-37" \
-   "system-images;android-37;google_apis;x86_64"
-  ```
-- Follow the instructions above for the platform you are building on
+> For the ellipsis value implementations must hide characters and atomic
+> inline-level elements at the end edge of the line as necessary to fit the
+> ellipsis, and place the ellipsis immediately adjacent to the end edge of the
+> remaining inline content. The first character or atomic inline-level element
+> on a line must be clipped rather than ellipsed.
 
-### OpenHarmony
+## How it was checked
 
-- Follow the instructions above for the platform you are building on to prepare the environment.
-- Depending on the target distribution (e.g. `HarmonyOS NEXT` vs pure `OpenHarmony`) the build configuration will differ slightly.
-- Ensure that the following environment variables are set
-  - `DEVECO_SDK_HOME` (Required when targeting `HarmonyOS NEXT`)
-  - `OHOS_BASE_SDK_HOME` (Required when targeting `OpenHarmony`)
-  - `OHOS_SDK_NATIVE` (e.g. `${DEVECO_SDK_HOME}/default/openharmony/native` or `${OHOS_BASE_SDK_HOME}/${API_VERSION}/native`)
-  - `SERVO_OHOS_SIGNING_CONFIG`: Path to json file containing a valid signing configuration for the demo app.
-- Review the detailed instructions at [Building for OpenHarmony].
-- The target distribution can be modified by passing `--flavor=<default|harmonyos>` to `mach <build|package|install>`.
+From the commit's own run (servoshell, headless Chrome 156):
+`host/text-overflow.html`, the ink at the end of ten cases matches Chrome
+except the `<string>` value, which Chrome does not support; `scrollWidth`
+unchanged. WPT `text-overflow-in-anonymous-block` passes.
+
+Rerun on 2026-11-03, Chrome side only (no Servo build): `text-overflow.html`
+gives `supports ellipsis=true string=false`.
+
+The restack's gate (2026-11-05) ran on this change before the day's fixups
+to lower refs were folded in (the same patch): `mach fmt` changed nothing,
+`test-tidy` passed, and `mach check` exited 0 with no warnings. At the
+stack's tip the same checks and `mach clippy` pass.
+
+## Questions a reviewer may ask
+
+- **Why is the `<string>` value of `text-overflow` supported when Chrome does
+  not?** Stylo parses it and the spec defines it; Firefox supports it.
+- **Does scrolling still reveal the hidden text?** Yes: hidden text keeps a
+  fragment with no glyphs, so positions and `scrollWidth` do not change.
