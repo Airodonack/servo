@@ -1,91 +1,86 @@
-# The Servo Parallel Browser Engine Project
+> One change of the Servo fork: `review/15`, 15 of 29 in the stack.
+> Below it: [`review/14`](https://github.com/Airodonack/servo/tree/review/14). Above it: [`review/16`](https://github.com/Airodonack/servo/tree/review/16).
+> The change itself: [commit a5355ca8482793773911b6fac75fe4fec8941170](https://github.com/Airodonack/servo/commit/a5355ca8482793773911b6fac75fe4fec8941170). This README sits in a commit on top of it and is not part of the pull request.
+> The whole stack: [overview README](https://github.com/Airodonack/servo/blob/vodscribe/main/README.md).
 
-Servo is a prototype web browser engine written in the
-[Rust](https://github.com/rust-lang/rust) language. It is currently developed on
-64-bit macOS, 64-bit Linux, 64-bit Windows, 64-bit OpenHarmony, and Android.
+# Inline grids sit on the baseline of their first item's text
 
-Servo welcomes contribution from everyone. Check out:
+An `inline-grid` made its line about 3 px taller than in other engines,
+because the grid's baseline came from the bottom of its first item's box
+instead of that item's text. This change takes the baseline from the item's
+own layout, as CSS Grid specifies. It is independent of the rest of the
+stack.
 
-- The [Servo Book](https://book.servo.org) for documentation
-- [servo.org](https://servo.org/) for news and guides
+## The problem
 
-Coordination of Servo development happens:
-- Here in the Github Issues
-- On the [Servo Zulip](https://servo.zulipchat.com/)
-- In video calls advertised in the [Servo Project](https://github.com/servo/project/issues) repo.
+```html
+<p>Uploaded <span style="display: inline-grid">3 days ago</span></p>
+```
 
-## Getting started
+The line was 18.20 px tall at 13 px text, where Chrome makes it 15. Taffy,
+which lays out grids, only knows item baselines from its own baseline
+alignment pass. Without one, it synthesized the grid's baseline from the
+bottom of the first item's border box, which lifted the grid above the text's
+baseline and made the line taller.
 
-For more detailed build instructions, see the Servo Book under [Getting the Code] and [Building Servo].
+```mermaid
+flowchart LR
+    subgraph before["Before"]
+        A["grid baseline = bottom of item box<br/>grid sits high, line grows by 3 px"]
+    end
+    subgraph after["After"]
+        B["grid baseline = item's text baseline<br/>line as tall as plain text"]
+    end
+```
 
-[Getting the Code]: https://book.servo.org/building/getting-the-code.html
-[Building Servo]: https://book.servo.org/building/building.html
+## The change
 
-### macOS
+[`TaffyContainer::first_baseline_from_grid_items`](https://github.com/Airodonack/servo/blob/a5355ca8482793773911b6fac75fe4fec8941170/components/layout/taffy/layout.rs#L731-L804)
+picks the item the spec names: the first item in the first row that takes
+part in baseline alignment, else the first item in row-major order. It uses
+that item's baseline from its final layout, which Servo keeps for each child.
+Items aligned by `last baseline` do not count. When `order` is used, Taffy's
+item order may differ from Servo's, so Taffy's answer is kept
+([lines 756 to 769](https://github.com/Airodonack/servo/blob/a5355ca8482793773911b6fac75fe4fec8941170/components/layout/taffy/layout.rs#L756-L769)).
+It is called where the grid's layout result is built
+([lines 526 to 531](https://github.com/Airodonack/servo/blob/a5355ca8482793773911b6fac75fe4fec8941170/components/layout/taffy/layout.rs#L526-L531)).
 
-- Download and install [Xcode](https://developer.apple.com/xcode/) and [`brew`](https://brew.sh/).
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+## Options considered
 
-### Linux
+| Option | Why not chosen |
+|---|---|
+| **Compute the baseline in Servo from Taffy's item info** (this change) | Chosen: Servo already has each item's real baseline. |
+| Fix Taffy | Taffy does not keep item baselines outside its alignment pass; worth sending there too, but Servo would wait for a release. |
+| Handle `order` here | Needs Taffy's item order mapping; rare on inline grids. |
 
-- Install `curl`:
-  - Arch: `sudo pacman -S --needed curl`
-  - Debian, Ubuntu: `sudo apt install curl`
-  - Fedora: `sudo dnf install curl`
-  - Gentoo: `sudo emerge net-misc/curl`
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+## Spec
 
-### Windows
+[CSS Grid 1, grid container baselines](https://drafts.csswg.org/css-grid/#grid-baselines):
 
-- Download [`uv`](https://docs.astral.sh/uv/getting-started/installation/#standalone-installer), and [`rustup`](https://win.rustup.rs/)
-  - Be sure to select *Quick install via the Visual Studio Community installer*
-- Ensure that [`winget`](https://learn.microsoft.com/en-us/windows/package-manager/winget/) is available. It should be preinstalled on Windows 10 1809+ and Windows 11, otherwise can be [`manually installed`](https://github.com/microsoft/winget-cli#installing-the-client).
-- In the Visual Studio Installer, ensure the following components are installed:
-  - **Windows 10/11 SDK (anything >= 10.0.19041.0)** (`Microsoft.VisualStudio.Component.Windows{10, 11}SDK.{>=19041}`)
-  - **MSVC v143 - VS 2022 C++ x64/x86 build tools (Latest)** (`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`)
-  - **C++ ATL for latest v143 build tools (x86 & x64)** (`Microsoft.VisualStudio.Component.VC.ATL`)
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `.\mach bootstrap`
-- Build servoshell: `.\mach build`
+> Otherwise, if the grid container has at least one grid item, the grid
+> container's first baseline set is generated from the alignment baseline of
+> the first grid item in row-major grid order. If the grid item has no
+> alignment baseline in the grid's inline axis, then one is first synthesized
+> from its border edges.
 
-### Android
+## How it was checked
 
-- Ensure that the following environment variables are set:
-  - `ANDROID_SDK_ROOT`
-  - `ANDROID_NDK_ROOT`: `$ANDROID_SDK_ROOT/ndk/28.2.13676358/`
- `ANDROID_SDK_ROOT` can be any directory (such as `~/android-sdk`).
-  All of the Android build dependencies will be installed there.
-- Install the latest version of the [Android command-line
-  tools](https://developer.android.com/studio#command-tools) to
-  `$ANDROID_SDK_ROOT/cmdline-tools/latest`.
-- Run the following command to install the necessary components:
-  ```shell
-  sudo $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install \
-   "build-tools;36.0.0" \
-   "emulator" \
-   "ndk;29.0.14206865" \
-   "platform-tools" \
-   "platforms;android-37" \
-   "system-images;android-37;google_apis;x86_64"
-  ```
-- Follow the instructions above for the platform you are building on
+From the commit's own run (servoshell, headless Chrome 156):
+`host/atomic-baseline.html`, the inline-grid line is 15.13 px where it was
+18.20 (Chrome 15.00); inline-flex and inline-block unchanged.
 
-### OpenHarmony
+Rerun on 2026-11-03, Chrome side only (no Servo build): `atomic-baseline.html`
+gives `igrid line_height=15.00`.
 
-- Follow the instructions above for the platform you are building on to prepare the environment.
-- Depending on the target distribution (e.g. `HarmonyOS NEXT` vs pure `OpenHarmony`) the build configuration will differ slightly.
-- Ensure that the following environment variables are set
-  - `DEVECO_SDK_HOME` (Required when targeting `HarmonyOS NEXT`)
-  - `OHOS_BASE_SDK_HOME` (Required when targeting `OpenHarmony`)
-  - `OHOS_SDK_NATIVE` (e.g. `${DEVECO_SDK_HOME}/default/openharmony/native` or `${OHOS_BASE_SDK_HOME}/${API_VERSION}/native`)
-  - `SERVO_OHOS_SIGNING_CONFIG`: Path to json file containing a valid signing configuration for the demo app.
-- Review the detailed instructions at [Building for OpenHarmony].
-- The target distribution can be modified by passing `--flavor=<default|harmonyos>` to `mach <build|package|install>`.
+On Servo main b88af263d1 (the rebase of 2026-11-06), at this commit: `mach
+fmt` changed nothing, `test-tidy` passed, and `mach check` exited 0 with no
+warnings. At the stack's tip the same checks and `mach clippy` pass, and the
+WPT directories run before the rebase give the same results.
+
+## Questions a reviewer may ask
+
+- **Why not fix Taffy?** Worth sending there too, but Taffy does not keep
+  item baselines outside its alignment pass, and Servo would wait for a
+  release.
+- **What happens with `order`?** Taffy's item order may then differ from
+  Servo's, so Taffy's own answer is kept.
