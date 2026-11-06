@@ -1,91 +1,106 @@
-# The Servo Parallel Browser Engine Project
+> One change of the Servo fork: `review/10`, 10 of 29 in the stack.
+> Below it: [`review/09`](https://github.com/Airodonack/servo/tree/review/09). Above it: [`review/11`](https://github.com/Airodonack/servo/tree/review/11).
+> The change itself: [commit 80bb814c0df3bbf627c100876554255f94938997](https://github.com/Airodonack/servo/commit/80bb814c0df3bbf627c100876554255f94938997). This README sits in a commit on top of it and is not part of the pull request.
+> The whole stack: [overview README](https://github.com/Airodonack/servo/blob/vodscribe/main/README.md).
 
-Servo is a prototype web browser engine written in the
-[Rust](https://github.com/rust-lang/rust) language. It is currently developed on
-64-bit macOS, 64-bit Linux, 64-bit Windows, 64-bit OpenHarmony, and Android.
+# Icons drawn with currentColor take the colour of the text around them
 
-Servo welcomes contribution from everyone. Check out:
+Inline SVG icons were black whatever the colour of the text around them.
+This change passes the colour an inline `<svg>` inherits to the copy of it
+that Servo draws, so `currentColor` resolves as in other browsers. It is
+independent of the rest of the stack.
 
-- The [Servo Book](https://book.servo.org) for documentation
-- [servo.org](https://servo.org/) for news and guides
+## The problem
 
-Coordination of Servo development happens:
-- Here in the Github Issues
-- On the [Servo Zulip](https://servo.zulipchat.com/)
-- In video calls advertised in the [Servo Project](https://github.com/servo/project/issues) repo.
+```html
+<button style="color: rgb(0, 128, 255)">
+  <svg width="16" height="16"><path stroke="currentColor" d="..."/></svg> Save
+</button>
+```
 
-## Getting started
+The icon should be blue, like the text. In Servo it was black.
 
-For more detailed build instructions, see the Servo Book under [Getting the Code] and [Building Servo].
+Servo does not paint an inline `<svg>` itself. Script clones the subtree,
+serializes it to a `data:` URL, and layout draws that as an image with usvg.
+The serialized document has no HTML ancestors, so the `color` the `<svg>`
+inherits is lost, and usvg resolves `currentColor` to its default, black.
 
-[Getting the Code]: https://book.servo.org/building/getting-the-code.html
-[Building Servo]: https://book.servo.org/building/building.html
+```mermaid
+flowchart LR
+    subgraph before["Before"]
+        A1["button<br/>color: blue"] --> A2["svg inherits blue"] --> A3["clone and serialize<br/>no color in the copy"] --> A4["usvg: currentColor<br/>falls back to black"]
+    end
+    subgraph after["After"]
+        B1["button<br/>color: blue"] --> B2["layout sends the svg's<br/>computed color"] --> B3["script writes<br/>color=rgb on the root"] --> B4["usvg: currentColor<br/>is blue"]
+    end
+```
 
-### macOS
+## The change
 
-- Download and install [Xcode](https://developer.apple.com/xcode/) and [`brew`](https://brew.sh/).
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+- Layout reads the `<svg>`'s computed `color` and asks script for a
+  serialization made with it, when there is none yet or the colour differs
+  ([replaced.rs, lines 299 to 314](https://github.com/Airodonack/servo/blob/80bb814c0df3bbf627c100876554255f94938997/components/layout/replaced.rs#L299-L314)).
+  The request now carries the colour
+  ([`PendingSVGElementSerialization`](https://github.com/Airodonack/servo/blob/80bb814c0df3bbf627c100876554255f94938997/components/shared/layout/lib.rs#L669-L676)).
+- `SVGSVGElement::serialize_and_cache_subtree` keeps the colour it serialized
+  with, does nothing if asked again with the same one, and writes it as the
+  `color` attribute of the cloned root, where usvg looks for it
+  ([svgsvgelement.rs, lines 84 to 149](https://github.com/Airodonack/servo/blob/80bb814c0df3bbf627c100876554255f94938997/components/script/dom/svg/svgsvgelement.rs#L84-L149),
+  the attribute at
+  [lines 121 to 134](https://github.com/Airodonack/servo/blob/80bb814c0df3bbf627c100876554255f94938997/components/script/dom/svg/svgsvgelement.rs#L121-L134)).
+  A `color` set inside the SVG still wins, since usvg uses the nearest one.
+- A later change of `color` alone is only repaint damage, which keeps the old
+  image. The damage pass compares the colour and asks for a new serialization
+  ([traversal.rs, lines 207 to 221](https://github.com/Airodonack/servo/blob/80bb814c0df3bbf627c100876554255f94938997/components/layout/traversal.rs#L207-L221)).
+  Script marks the node dirty only when the cache really changed
+  ([window.rs, lines 4024 to 4030](https://github.com/Airodonack/servo/blob/80bb814c0df3bbf627c100876554255f94938997/components/script/dom/window/window.rs#L4024-L4030)).
+- Dropping a stale image also drops the image cache's listeners for its
+  rasterization, so the window would wait for it forever and reftest
+  screenshots never settled.
+  [`forget_pending_rasterizations_for_node`](https://github.com/Airodonack/servo/blob/80bb814c0df3bbf627c100876554255f94938997/components/script/dom/window/window.rs#L833-L845)
+  clears that wait.
+- `color` becomes an SVG presentation attribute, so `<svg color="red">` works
+  as it does elsewhere
+  ([svgelement.rs, lines 300 to 307](https://github.com/Airodonack/servo/blob/80bb814c0df3bbf627c100876554255f94938997/components/script/dom/svg/svgelement.rs#L300-L307)).
 
-### Linux
+## Options considered
 
-- Install `curl`:
-  - Arch: `sudo pacman -S --needed curl`
-  - Debian, Ubuntu: `sudo apt install curl`
-  - Fedora: `sudo dnf install curl`
-  - Gentoo: `sudo emerge net-misc/curl`
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+| Option | Why not chosen |
+|---|---|
+| **Write the computed `color` on the serialized root** (this change) | Chosen: one attribute, uses usvg's own `currentColor` rule, keeps inner overrides. |
+| Replace every `currentColor` in the copy with the colour | Must walk every paint attribute and style; misses `color` set lower in the SVG. |
+| Pass the colour to the renderer beside the image | The image cache keys and decodes a `data:` URL like any other image; a side channel would reach through it for one case. |
+| Paint inline SVG natively | The right end state, but a new SVG renderer, far beyond this fix. |
 
-### Windows
+## Spec
 
-- Download [`uv`](https://docs.astral.sh/uv/getting-started/installation/#standalone-installer), and [`rustup`](https://win.rustup.rs/)
-  - Be sure to select *Quick install via the Visual Studio Community installer*
-- Ensure that [`winget`](https://learn.microsoft.com/en-us/windows/package-manager/winget/) is available. It should be preinstalled on Windows 10 1809+ and Windows 11, otherwise can be [`manually installed`](https://github.com/microsoft/winget-cli#installing-the-client).
-- In the Visual Studio Installer, ensure the following components are installed:
-  - **Windows 10/11 SDK (anything >= 10.0.19041.0)** (`Microsoft.VisualStudio.Component.Windows{10, 11}SDK.{>=19041}`)
-  - **MSVC v143 - VS 2022 C++ x64/x86 build tools (Latest)** (`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`)
-  - **C++ ATL for latest v143 build tools (x86 & x64)** (`Microsoft.VisualStudio.Component.VC.ATL`)
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `.\mach bootstrap`
-- Build servoshell: `.\mach build`
+[CSS Color 4, currentcolor](https://drafts.csswg.org/css-color-4/#currentcolor-color):
 
-### Android
+> The keyword currentcolor represents value of the color property on the same element.
 
-- Ensure that the following environment variables are set:
-  - `ANDROID_SDK_ROOT`
-  - `ANDROID_NDK_ROOT`: `$ANDROID_SDK_ROOT/ndk/28.2.13676358/`
- `ANDROID_SDK_ROOT` can be any directory (such as `~/android-sdk`).
-  All of the Android build dependencies will be installed there.
-- Install the latest version of the [Android command-line
-  tools](https://developer.android.com/studio#command-tools) to
-  `$ANDROID_SDK_ROOT/cmdline-tools/latest`.
-- Run the following command to install the necessary components:
-  ```shell
-  sudo $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install \
-   "build-tools;36.0.0" \
-   "emulator" \
-   "ndk;29.0.14206865" \
-   "platform-tools" \
-   "platforms;android-37" \
-   "system-images;android-37;google_apis;x86_64"
-  ```
-- Follow the instructions above for the platform you are building on
+The `<svg>` element's `color` is inherited from the HTML around it, so its
+shapes paint in that colour.
 
-### OpenHarmony
+## How it was checked
 
-- Follow the instructions above for the platform you are building on to prepare the environment.
-- Depending on the target distribution (e.g. `HarmonyOS NEXT` vs pure `OpenHarmony`) the build configuration will differ slightly.
-- Ensure that the following environment variables are set
-  - `DEVECO_SDK_HOME` (Required when targeting `HarmonyOS NEXT`)
-  - `OHOS_BASE_SDK_HOME` (Required when targeting `OpenHarmony`)
-  - `OHOS_SDK_NATIVE` (e.g. `${DEVECO_SDK_HOME}/default/openharmony/native` or `${OHOS_BASE_SDK_HOME}/${API_VERSION}/native`)
-  - `SERVO_OHOS_SIGNING_CONFIG`: Path to json file containing a valid signing configuration for the demo app.
-- Review the detailed instructions at [Building for OpenHarmony].
-- The target distribution can be modified by passing `--flavor=<default|harmonyos>` to `mach <build|package|install>`.
+From the commit's own runs (servoshell and headless Chrome 156):
+`host/svg-currentcolor.html`, eight cells read from screenshot pixels: 3 of
+8 right before, 7 of 8 after. The one left is a page style sheet rule
+inside the SVG, which Servo does not apply to inline SVG at all (a separate
+bug). WPT `/svg` (1369 tests) and `/css/css-color` (765) ran as expected;
+three `color` presentation-attribute subtests now pass; `color-svg-visited`
+now fails, because the SVG really draws `currentColor` and Servo has no
+`:visited`.
+
+The restack's gate (2026-11-05) ran on this change before the day's fixups
+to lower refs were folded in (the same patch): `mach fmt` changed nothing,
+`test-tidy` passed, and `mach check` exited 0 with no warnings. At the
+stack's tip the same checks and `mach clippy` pass.
+
+## Questions a reviewer may ask
+
+- **Does a colour change re-serialize the SVG every frame during a colour
+  animation?** Yes, once per distinct colour. Each serialization is a clone
+  and an image decode. Not measured; the common case is a static colour.
+- **Why not make page style sheets reach inline SVG too?** A separate, larger
+  bug; this change only restores what the SVG inherits.
