@@ -1,91 +1,118 @@
-# The Servo Parallel Browser Engine Project
+> One change of the Servo fork: `review/02`, 2 of 29 in the stack.
+> Below it: [`review/01`](https://github.com/Airodonack/servo/tree/review/01). Above it: [`review/03`](https://github.com/Airodonack/servo/tree/review/03).
+> The change itself: [commit 6ecc8a042e27800f23115858b4bad126b5b80ae3](https://github.com/Airodonack/servo/commit/6ecc8a042e27800f23115858b4bad126b5b80ae3). This README sits in a commit on top of it and is not part of the pull request.
+> The whole stack: [overview README](https://github.com/Airodonack/servo/blob/vodscribe/main/README.md).
 
-Servo is a prototype web browser engine written in the
-[Rust](https://github.com/rust-lang/rust) language. It is currently developed on
-64-bit macOS, 64-bit Linux, 64-bit Windows, 64-bit OpenHarmony, and Android.
+# Videos without text tracks fire timeupdate again during playback
 
-Servo welcomes contribution from everyone. Check out:
+A playing video with no captions or other text tracks never fired
+`timeupdate`. Pages that follow playback through that event, such as custom
+players' progress bars and the Media Source seek tests, saw time stand still.
+This change fires it again. One step of one function moves into a helper.
 
-- The [Servo Book](https://book.servo.org) for documentation
-- [servo.org](https://servo.org/) for news and guides
+## The problem
 
-Coordination of Servo development happens:
-- Here in the Github Issues
-- On the [Servo Zulip](https://servo.zulipchat.com/)
-- In video calls advertised in the [Servo Project](https://github.com/servo/project/issues) repo.
+During playback the player reports its position about every 500 ms, and
+[`playback_position_changed`](https://github.com/Airodonack/servo/blob/6ecc8a042e27800f23115858b4bad126b5b80ae3/components/script/dom/html/embedded_content/htmlmediaelement.rs#L2918-L2940)
+runs the spec's "time marches on" steps. Step 6 of those steps queues the
+periodic `timeupdate`.
 
-## Getting started
+[`time_marches_on`](https://github.com/Airodonack/servo/blob/6ecc8a042e27800f23115858b4bad126b5b80ae3/components/script/dom/html/embedded_content/htmlmediaelement.rs#L631-L650)
+first needs the element's text track list, to collect cues. That list is
+created lazily, by the
+[`textTracks` getter](https://github.com/Airodonack/servo/blob/6ecc8a042e27800f23115858b4bad126b5b80ae3/components/script/dom/html/embedded_content/htmlmediaelement.rs#L3647-L3656),
+`addTextTrack()` or a `<track>` child. Before this change, without the list
+the function returned at once, and step 6 never ran:
 
-For more detailed build instructions, see the Servo Book under [Getting the Code] and [Building Servo].
+```mermaid
+flowchart TD
+    A["player reports position"] --> B["time_marches_on"]
+    B --> C{"text track list exists?"}
+    C -- "no: no track, page never read textTracks" --> D["return"]
+    D --> X["no timeupdate, ever"]
+    C -- yes --> E["steps 1 to 5: cues"]
+    E --> F["step 6: timeupdate, at most every 250 ms"]
+    F --> G["steps 7 and later: cue events"]
+```
 
-[Getting the Code]: https://book.servo.org/building/getting-the-code.html
-[Building Servo]: https://book.servo.org/building/building.html
+So whether a page got `timeupdate` depended on whether anything had ever
+touched `textTracks`. A plain `<video src>` with no `<track>` got none.
 
-### macOS
+## The change
 
-- Download and install [Xcode](https://developer.apple.com/xcode/) and [`brew`](https://brew.sh/).
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+Step 6 moves into its own function,
+[`queue_timeupdate_for_normal_playback`](https://github.com/Airodonack/servo/blob/6ecc8a042e27800f23115858b4bad126b5b80ae3/components/script/dom/html/embedded_content/htmlmediaelement.rs#L615-L629),
+unchanged. `time_marches_on` calls it in both places:
 
-### Linux
+- where step 6 was, after the cue lists
+  ([lines 699 to 700](https://github.com/Airodonack/servo/blob/6ecc8a042e27800f23115858b4bad126b5b80ae3/components/script/dom/html/embedded_content/htmlmediaelement.rs#L699-L700));
+- in the early return when there is no list
+  ([lines 643 to 650](https://github.com/Airodonack/servo/blob/6ecc8a042e27800f23115858b4bad126b5b80ae3/components/script/dom/html/embedded_content/htmlmediaelement.rs#L643-L650)).
 
-- Install `curl`:
-  - Arch: `sudo pacman -S --needed curl`
-  - Debian, Ubuntu: `sudo apt install curl`
-  - Fedora: `sudo dnf install curl`
-  - Gentoo: `sudo emerge net-misc/curl`
-- Install `uv`: `curl -LsSf https://astral.sh/uv/install.sh | sh` 
-- Install `rustup`: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `./mach bootstrap`
-- Build servoshell: `./mach build`
+```rust
+let Some(text_tracks_list) = self.text_tracks_list.get() else {
+    // No text tracks, so no cues to update, but the timeupdate of step 6
+    // still applies.
+    self.position_when_time_marches_on_ran
+        .set(Some(self.current_playback_position.get()));
+    self.queue_timeupdate_for_normal_playback(playback_was_moved_monotonic_increase);
+    return;
+};
+```
 
-### Windows
+The early return also records the position, as step 3 does on the full path.
+Step 4 uses that position as "last time" to find missed cues, so a track
+added later starts from the right place instead of from the first run.
 
-- Download [`uv`](https://docs.astral.sh/uv/getting-started/installation/#standalone-installer), and [`rustup`](https://win.rustup.rs/)
-  - Be sure to select *Quick install via the Visual Studio Community installer*
-- Ensure that [`winget`](https://learn.microsoft.com/en-us/windows/package-manager/winget/) is available. It should be preinstalled on Windows 10 1809+ and Windows 11, otherwise can be [`manually installed`](https://github.com/microsoft/winget-cli#installing-the-client).
-- In the Visual Studio Installer, ensure the following components are installed:
-  - **Windows 10/11 SDK (anything >= 10.0.19041.0)** (`Microsoft.VisualStudio.Component.Windows{10, 11}SDK.{>=19041}`)
-  - **MSVC v143 - VS 2022 C++ x64/x86 build tools (Latest)** (`Microsoft.VisualStudio.Component.VC.Tools.x86.x64`)
-  - **C++ ATL for latest v143 build tools (x86 & x64)** (`Microsoft.VisualStudio.Component.VC.ATL`)
-- Restart your shell to make sure `cargo` is available
-- Install the other dependencies: `.\mach bootstrap`
-- Build servoshell: `.\mach build`
+## Options considered
 
-### Android
+| Option | Why not chosen |
+|---|---|
+| **Run step 6 on the early return too** (this change) | Chosen: no behaviour change for elements with text tracks, and no new object. |
+| Create the text track list on first playback | Allocates a DOM object for every playing element only to find it empty. |
+| Fire `timeupdate` from `playback_position_changed` instead | Moves a step of "time marches on" out of the function that implements it, and the other callers would need it too. |
 
-- Ensure that the following environment variables are set:
-  - `ANDROID_SDK_ROOT`
-  - `ANDROID_NDK_ROOT`: `$ANDROID_SDK_ROOT/ndk/28.2.13676358/`
- `ANDROID_SDK_ROOT` can be any directory (such as `~/android-sdk`).
-  All of the Android build dependencies will be installed there.
-- Install the latest version of the [Android command-line
-  tools](https://developer.android.com/studio#command-tools) to
-  `$ANDROID_SDK_ROOT/cmdline-tools/latest`.
-- Run the following command to install the necessary components:
-  ```shell
-  sudo $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --install \
-   "build-tools;36.0.0" \
-   "emulator" \
-   "ndk;29.0.14206865" \
-   "platform-tools" \
-   "platforms;android-37" \
-   "system-images;android-37;google_apis;x86_64"
-  ```
-- Follow the instructions above for the platform you are building on
+## Spec
 
-### OpenHarmony
+[HTML, time marches on](https://html.spec.whatwg.org/multipage/media.html#time-marches-on),
+step 6, which does not depend on cues:
 
-- Follow the instructions above for the platform you are building on to prepare the environment.
-- Depending on the target distribution (e.g. `HarmonyOS NEXT` vs pure `OpenHarmony`) the build configuration will differ slightly.
-- Ensure that the following environment variables are set
-  - `DEVECO_SDK_HOME` (Required when targeting `HarmonyOS NEXT`)
-  - `OHOS_BASE_SDK_HOME` (Required when targeting `OpenHarmony`)
-  - `OHOS_SDK_NATIVE` (e.g. `${DEVECO_SDK_HOME}/default/openharmony/native` or `${OHOS_BASE_SDK_HOME}/${API_VERSION}/native`)
-  - `SERVO_OHOS_SIGNING_CONFIG`: Path to json file containing a valid signing configuration for the demo app.
-- Review the detailed instructions at [Building for OpenHarmony].
-- The target distribution can be modified by passing `--flavor=<default|harmonyos>` to `mach <build|package|install>`.
+> If the time was reached through the usual monotonic increase of the current
+> playback position during normal playback, and if the user agent has not
+> fired a timeupdate event at the element in the past 15 to 250ms and is not
+> still running event handlers for such an event, then the user agent must
+> queue a media element task given the media element to fire an event named
+> timeupdate at the element.
+
+With no text tracks, steps 1 and 2 give empty cue lists. The spec has no
+early exit before step 6.
+
+## How it was checked
+
+From the runs of `host/timeupdate.html` (a progressive MP4 played for 5 s,
+`timeupdate` events counted) on 2026-10-22, with the fork then on the 0.7.0
+base:
+
+| Build | Events in 5 s | `currentTime` at 5 s |
+|---|---|---|
+| upstream 0.7.0 release (`tu-prog-070`) | 0 | 3.95 |
+| fork without the fix (`tu-prog`) | 0 | 3.95 |
+| fork with the fix (`tu-prog2`) | 8 | 3.55 |
+
+The same page on the rebased stack (2026-11-01) counts 9 events by 4.45 s.
+At this commit, the restack's gate (2026-11-05): `mach fmt` changed nothing,
+`test-tidy` passed, and `mach check` exited 0 with no warnings.
+
+Not yet done: a run without the fix on the current upstream base, and a
+web-platform-test for `timeupdate` on a video with no text tracks.
+
+## Questions a reviewer may ask
+
+- **Why 8 events in 3.5 s and not 14?** The player reports the position
+  about every 500 ms, and step 6 runs once per report. The 250 ms floor
+  never applies at that rate.
+- **Does this change anything for elements with text tracks?** No. The full
+  path calls the same helper at the same step.
+- **Why record the position on the early return?** So that step 4's "last
+  time" is right when a text track appears later. Without it the first full
+  run would treat everything since playback started as missed.
